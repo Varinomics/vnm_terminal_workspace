@@ -31,3 +31,20 @@ environment values.
 For source integration, set `VNM_FRAMEWORK_SOURCE_DIR` to a current framework
 checkout or provide `vnm_framework::vnm_environment_policy` before adding this
 project. The network fallback tracks the owned framework `master` branch.
+
+`vnm_terminal_workspace::vnm_terminal_workspace_surface_provider` is the
+only installed worker-runtime composition. Its PIMPL owns the real framework
+remote-UI runtime, a fixed packaged neutral QML root, exactly one
+`VNM_TerminalSurface`, the reusable scrollbar, internal layout/focus/timestamp
+connections, and the neutral coordinator. The installed API accepts only value
+configuration and host-neutral remote-sink, GUI-dispatch, child-fact, and
+termination controls; it exports no Qt object, root, surface, provider adapter,
+or native-start handle. Initialization establishes the hosted surface before a
+one-shot run projects the strict request plus any already-authorized
+environment entries into the sole structured start API. The composition bounds
+fact reconciliation and terminates an unreconciled worker so hosted cleanup can
+settle it. It does not authorize capabilities, own session custody, persist
+history, or define product projection.
+Source builds may set `VNM_TERMINAL_SOURCE_DIR`,
+`VNM_TERMINAL_SURFACE_SOURCE_DIR`, and `VNM_QML_CHROME_SOURCE_DIR`; installed
+consumers resolve the published `vnm_terminal` and surface packages.

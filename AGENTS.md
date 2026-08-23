@@ -26,3 +26,4 @@ artifact.
 |---|---|---|
 | Pure terminal launch request and cwd advisory | `src/terminal_launch_request.cpp`, `include/vnm_terminal_workspace/terminal_launch_request.h` | `vnm_terminal_workspace_request_tests` |
 | Neutral settlement receipt inbox | `src/terminal_settlement_receipt_inbox.{h,cpp}` | `vnm_terminal_workspace_settlement_receipt_tests` |
+| Neutral terminal worker runtime, real surface provider, and child facts | `src/terminal_{worker_runtime,surface_runtime_provider}.cpp`, `include/vnm_terminal_workspace/terminal_worker_runtime.h` | `vnm_terminal_workspace_worker_runtime_tests`, `vnm_terminal_workspace_surface_provider_tests` |

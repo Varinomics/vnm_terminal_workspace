@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/vnm_terminal_workspace">
+        <file alias="TerminalWorkerRoot.qml">TerminalWorkerRoot.qml</file>
+    </qresource>
+</RCC>

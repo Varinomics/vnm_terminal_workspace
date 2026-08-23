@@ -1,7 +1,18 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(vnm_environment_policy CONFIG)
+find_dependency(vnm_framework CONFIG)
+find_dependency(vnm_terminal CONFIG)
+
+if(NOT TARGET vnm_terminal_workspace::_terminal_app_support_dependency)
+    add_library(
+        vnm_terminal_workspace::_terminal_app_support_dependency
+        INTERFACE IMPORTED GLOBAL)
+    set_property(
+        TARGET vnm_terminal_workspace::_terminal_app_support_dependency
+        PROPERTY INTERFACE_LINK_LIBRARIES
+            vnm_terminal::vnm_terminal_app_support)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/vnm_terminal_workspace_targets.cmake")
 
