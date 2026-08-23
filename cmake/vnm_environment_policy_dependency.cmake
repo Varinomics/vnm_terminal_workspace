@@ -43,7 +43,7 @@ function(vnm_terminal_workspace_make_environment_policy_available)
             EXCLUDE_FROM_ALL)
     else()
         FetchContent_Declare(vnm_terminal_workspace_framework
-            GIT_REPOSITORY https://github.com/imakris/vnm_framework.git
+            GIT_REPOSITORY https://github.com/Varinomics/vnm_framework.git
             GIT_TAG master
             GIT_SHALLOW FALSE
             EXCLUDE_FROM_ALL)
