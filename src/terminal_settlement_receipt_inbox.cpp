@@ -68,6 +68,7 @@ Settlement_receipt_ingest_result Terminal_settlement_receipt_inbox::ingest(
         settled_at,
         m_next_insertion_sequence++,
     });
+    ++m_mutation_revision;
     return Settlement_receipt_ingest_result::RECORDED;
 }
 
@@ -99,7 +100,20 @@ bool Terminal_settlement_receipt_inbox::acknowledge(
         return false;
     }
     m_entries.erase(entry);
+    ++m_mutation_revision;
     return true;
+}
+
+std::vector<Terminal_settlement_receipt_key>
+Terminal_settlement_receipt_inbox::keys(Time_point now)
+{
+    expire(now);
+    std::vector<Terminal_settlement_receipt_key> result;
+    result.reserve(m_entries.size());
+    for (const Entry& entry : m_entries) {
+        result.push_back(entry.key);
+    }
+    return result;
 }
 
 std::size_t Terminal_settlement_receipt_inbox::size(Time_point now)
@@ -110,7 +124,15 @@ std::size_t Terminal_settlement_receipt_inbox::size(Time_point now)
 
 void Terminal_settlement_receipt_inbox::purge_for_shutdown()
 {
+    if (!m_entries.empty()) {
+        ++m_mutation_revision;
+    }
     m_entries.clear();
+}
+
+std::uint64_t Terminal_settlement_receipt_inbox::mutation_revision() const
+{
+    return m_mutation_revision;
 }
 
 Terminal_settlement_receipt_inbox::Terminal_settlement_receipt_inbox(
@@ -123,12 +145,16 @@ Terminal_settlement_receipt_inbox::Terminal_settlement_receipt_inbox(
 
 void Terminal_settlement_receipt_inbox::expire(Time_point now)
 {
+    const std::size_t previous_size = m_entries.size();
     std::erase_if(
         m_entries,
         [now, retention = m_retention](const Entry& entry) {
             return now >= entry.settled_at &&
                 now - entry.settled_at >= retention;
         });
+    if (m_entries.size() != previous_size) {
+        ++m_mutation_revision;
+    }
 }
 
 } // namespace vnm::terminal_workspace

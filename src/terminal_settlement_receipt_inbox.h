@@ -49,8 +49,10 @@ public:
     bool acknowledge(
         const Terminal_settlement_receipt_key& key,
         Time_point now);
+    std::vector<Terminal_settlement_receipt_key> keys(Time_point now);
     std::size_t size(Time_point now);
     void purge_for_shutdown();
+    [[nodiscard]] std::uint64_t mutation_revision() const;
 
 private:
     struct Entry
@@ -69,6 +71,7 @@ private:
     std::size_t m_maximum_receipts;
     Duration m_retention;
     std::uint64_t m_next_insertion_sequence = 0U;
+    std::uint64_t m_mutation_revision = 0U;
     std::vector<Entry> m_entries;
 };
 

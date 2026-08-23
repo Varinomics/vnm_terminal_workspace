@@ -18,4 +18,5 @@ add_executable(
 target_link_libraries(vnm_terminal_workspace_source_consumer
     PRIVATE
         vnm_terminal_workspace::vnm_terminal_workspace_surface_provider
+        vnm_terminal_workspace::vnm_terminal_workspace_owner_client
         Qt6::Gui)

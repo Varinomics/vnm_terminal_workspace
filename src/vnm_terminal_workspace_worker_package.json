@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "plugin": {
+    "id": "vnm_terminal_workspace.terminal_worker",
+    "name": "Terminal workspace worker",
+    "version": "0.1.0",
+    "description": "Neutral hosted terminal worker"
+  },
+  "framework": {
+    "allowed_modes": [
+      "isolated_process"
+    ],
+    "default_mode": "isolated_process",
+    "capabilities": [
+      "remote_ui"
+    ]
+  },
+  "product": {
+    "family": "vnm_terminal_workspace"
+  }
+}

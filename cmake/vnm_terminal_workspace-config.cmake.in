@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(Qt6 6.11 COMPONENTS Core Network)
 find_dependency(vnm_framework CONFIG)
 find_dependency(vnm_terminal CONFIG)
 

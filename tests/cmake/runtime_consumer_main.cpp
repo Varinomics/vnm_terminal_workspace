@@ -1,3 +1,4 @@
+#include <vnm_terminal_workspace/terminal_owner_client.h>
 #include <vnm_terminal_workspace/terminal_worker_runtime.h>
 
 #include <QCoreApplication>
@@ -139,6 +140,10 @@ static_assert(!Public_surface_escape<workspace::Terminal_worker_runtime>);
 static_assert(!Public_scrollbar_escape<workspace::Terminal_worker_runtime>);
 static_assert(!Public_root_escape<workspace::Terminal_worker_runtime>);
 static_assert(!Public_after_load_escape<workspace::Terminal_worker_runtime>);
+static_assert(!Public_surface_escape<workspace::Terminal_owner_client>);
+static_assert(!Public_scrollbar_escape<workspace::Terminal_owner_client>);
+static_assert(!Public_root_escape<workspace::Terminal_owner_client>);
+static_assert(!Public_after_load_escape<workspace::Terminal_owner_client>);
 static_assert(std::is_constructible_v<
     workspace::Terminal_worker_runtime,
     workspace::Terminal_worker_surface_configuration,
@@ -156,6 +161,14 @@ int main(int argc, char** argv)
     Consumer_termination termination;
     workspace::Terminal_worker_surface_configuration configuration;
     configuration.title = "Installed value-only consumer";
+    workspace::Terminal_owner_client_configuration owner_configuration;
+    owner_configuration.scope.product_identity = "consumer";
+    owner_configuration.scope.application_instance_identity = "compile-only";
+    owner_configuration.owner_executable_path = "C:/owner.exe";
+    owner_configuration.owner.hosted_worker_host_executable_path =
+        "C:/host.exe";
+    owner_configuration.owner.terminal_worker_library_path = "C:/worker.dll";
+    owner_configuration.owner.provider_namespace = "consumer.provider";
     workspace::Terminal_worker_runtime runtime(
         std::move(configuration),
         sink,
@@ -193,6 +206,7 @@ int main(int argc, char** argv)
         runtime.request_present();
     runtime.shutdown();
     return result == workspace::Terminal_worker_run_result::TERMINATED &&
+            !owner_configuration.scope.product_identity.empty() &&
             forwarded && termination.terminated && sink.created == 1 &&
             sink.destroyed == 1
         ? 0

@@ -48,3 +48,21 @@ history, or define product projection.
 Source builds may set `VNM_TERMINAL_SOURCE_DIR`,
 `VNM_TERMINAL_SURFACE_SOURCE_DIR`, and `VNM_QML_CHROME_SOURCE_DIR`; installed
 consumers resolve the published `vnm_terminal` and surface packages.
+
+`vnm_terminal_workspace::vnm_terminal_workspace_owner_client` is the installed
+value-only boundary to the packaged shared terminal-owner service. Owner locks,
+endpoints, one-time invitations, and exact authorized viewer identities are
+scoped by product and application instance. New-launch is the sole custody and
+worker-start operation. Attach-existing accepts an already-owned session,
+framework generation, authority epoch, and current attachment revision; it
+does not prepare or start another worker, surface, or child. Input and state
+forwarding require the current live attachment of a running generation.
+
+The owner is the sole terminal custody and child-fact reconciler. It records
+only framework-supplied nonzero generations, converges readiness and close
+causes once, and exposes an atomic live-custody plus neutral settlement-receipt
+snapshot. An optional lifetime capability may keep a protected custody
+attachable and receive its settlement; otherwise viewer disconnect closes,
+settles, drains, and purges the private bounded receipt inbox at shutdown.
+Neither the owner nor client selects product recovery policy, persists
+history, issues capabilities, or owns product projection.
