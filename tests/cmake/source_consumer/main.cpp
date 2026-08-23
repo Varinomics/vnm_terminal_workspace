@@ -11,12 +11,18 @@ int main()
     request.working_directory = "/workspace";
     request.base_environment_complete = true;
     request.cancellation.identity = "source-consumer-cancellation";
+    const auto advisory =
+        vnm::terminal_workspace::probe_terminal_working_directory(
+            request.working_directory,
+            {});
     const auto result =
         vnm::terminal_workspace::prepare_terminal_launch_request(
             std::move(request),
             vnm::terminal_workspace::Launch_platform::POSIX);
-    return result.status ==
-        vnm::terminal_workspace::Launch_request_status::ACCEPTED
+    return advisory ==
+                vnm::terminal_workspace::Working_directory_advisory::NOT_PROBED &&
+            result.status ==
+                vnm::terminal_workspace::Launch_request_status::ACCEPTED
         ? 0
         : 1;
 }

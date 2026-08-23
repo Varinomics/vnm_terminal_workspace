@@ -12,24 +12,21 @@ target_link_libraries(app PRIVATE
 
 The request contract preserves separated argument bytes, an absolute working
 directory, a complete caller-sanitized explicit base environment, stable
-request/session identities, and pre-custody cancellation. The independently
-encoded capability contribution carries only a trusted, exact-name-scoped
-environment contribution. Optional contribution failures remain local;
-required contribution failures reject the binding.
+request/session identities, and pre-custody cancellation. Callers may inject
+additional product-owned reserved names so those names cannot enter the base;
+capability issuance, binding, and trusted environment contributions remain
+outside this target.
 
-The capability allowlist is serialized in ascending unsigned UTF-8 byte order.
-Platform name-equivalent duplicates and Windows case collisions reject before
-ordering, serialization canonicalizes valid typed input, and strict decode
-rejects a noncanonical wire order. A product-owned name may be both an
-additional reserved base input and an allowed contribution name; that exact
-intersection is the only reserved-name exception. Framework, infrastructure,
-terminal-owned, lookup-sensitive, and pseudo-variable names remain prohibited.
+Request preparation and decoding are deterministic and never inspect the
+filesystem. `probe_terminal_working_directory` is a separate optional advisory;
+the terminal surface revalidates the working directory at native admission.
 
 This target performs no executable resolution, final-environment composition,
 native admission, process launch, generation allocation, surface construction,
-or terminal-child custody. It links only the framework environment-policy
-target to verify that the explicit base is already sanitized. Callers must not
-log serialized payloads, argument values, or environment values.
+terminal-child custody, or product capability policy. It links only the
+framework environment-policy target to verify that the explicit base is already
+sanitized. Callers must not log serialized payloads, argument values, or
+environment values.
 
 For source integration, set `VNM_FRAMEWORK_SOURCE_DIR` to a current framework
 checkout or provide `vnm_framework::vnm_environment_policy` before adding this
