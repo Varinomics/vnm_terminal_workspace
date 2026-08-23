@@ -1,13 +1,17 @@
 #include "vnm_terminal_workspace/terminal_owner_client.h"
+#include "vnm_terminal_workspace/terminal_worker_composition.h"
 
 #include "terminal_owner_process_identity.h"
 #include "terminal_owner_service_policy.h"
 #include "terminal_owner_wire.h"
 
+#include "vnm_framebuffer_store.h"
+
 #include <QCoreApplication>
 #include <QDeadlineTimer>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QLocalSocket>
 #include <QProcess>
@@ -18,9 +22,11 @@
 
 #include <TlHelp32.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -98,7 +104,8 @@ workspace::Launch_request_result prepared_request(
     const QTemporaryDir& directory,
     std::string launch_request_identity = "client-owner-launch",
     std::string session_identity = "client-owner-session",
-    int ping_count = 10)
+    int ping_count = 10,
+    bool emit_output = false)
 {
     workspace::Terminal_launch_request request;
     request.launch_request_id = std::move(launch_request_identity);
@@ -109,7 +116,9 @@ workspace::Launch_request_result prepared_request(
         "/d",
         "/s",
         "/c",
-        "ping -n " + std::to_string(ping_count) + " 127.0.0.1 >nul",
+        (emit_output ? "echo workspace-envelope-capture & " : "") +
+            std::string("ping -n ") + std::to_string(ping_count) +
+            " 127.0.0.1 >nul",
     };
     request.working_directory = QDir::toNativeSeparators(
         directory.path()).toStdString();
@@ -510,6 +519,31 @@ bool scoped_owner_and_attach_existing()
             resize) == workspace::Terminal_owner_proxy_outcome::ADMITTED,
         "only the authenticated current attachment may forward state");
 
+    constexpr std::array<std::uint8_t, 7> k_message{
+        'm', 'e', 's', 's', 'a', 'g', 'e',
+    };
+    const auto stale_message = client->submit_message(
+        before_attach.session_identity,
+        before_attach.generation,
+        before_attach.attachment.revision + 1U,
+        k_message);
+    const auto current_message = client->submit_message(
+        before_attach.session_identity,
+        before_attach.generation,
+        before_attach.attachment.revision,
+        k_message);
+    ok &= check(
+        stale_message.routing ==
+                workspace::Terminal_owner_proxy_outcome::STALE_ATTACHMENT &&
+            !stale_message.submission &&
+            current_message.routing ==
+                workspace::Terminal_owner_proxy_outcome::ADMITTED &&
+            current_message.submission &&
+            current_message.submission->outcome ==
+                workspace::Terminal_worker_message_submission_outcome::
+                    CAPABILITY_MISSING,
+        "whole-message input must share authenticated RUNNING/current-attachment gates before fixed package capability dispatch");
+
     ok &= check(
         client->request_close(
             before_attach.session_identity,
@@ -552,6 +586,108 @@ bool scoped_owner_and_attach_existing()
             acknowledged_snapshot.custodies.empty() &&
             acknowledged_snapshot.unprotected_receipts.empty(),
         "receipt acknowledgement must advance the atomic barrier without history");
+    client.reset();
+    return ok;
+}
+
+bool common_surface_and_capture_reach_the_neutral_provider()
+{
+    using Neutral_client = workspace::Terminal_owner_package_client<
+        workspace::Neutral_terminal_worker_package_policy>;
+
+    const std::string unique = std::to_string(
+        static_cast<long long>(QCoreApplication::applicationPid()));
+    auto client = Neutral_client::connect(configuration(
+        "client-envelope-product",
+        "surface-capture-" + unique));
+    QTemporaryDir directory;
+    const workspace::Launch_request_result request = prepared_request(
+        directory,
+        "client-envelope-launch",
+        "client-envelope-session",
+        8,
+        true);
+    bool ok = true;
+    ok &= check(
+        client != nullptr && directory.isValid() &&
+            request.status == workspace::Launch_request_status::ACCEPTED,
+        "the common-envelope provider fixture must connect and prepare");
+    if (!ok || !client) {
+        return false;
+    }
+
+    workspace::Terminal_worker_launch_configuration launch_configuration;
+    launch_configuration.surface.logical_width = 160;
+    launch_configuration.surface.logical_height = 90;
+    launch_configuration.surface.maximum_physical_width = 257;
+    launch_configuration.surface.maximum_physical_height = 193;
+    launch_configuration.surface.scale_factor = 1.25F;
+    launch_configuration.surface.title = "Exact neutral envelope title";
+    launch_configuration.output_capture =
+        workspace::Terminal_worker_output_capture_configuration{
+            QDir::toNativeSeparators(
+                directory.filePath("owner-envelope-capture")).toStdString(),
+            4096U,
+        };
+    const workspace::Terminal_owner_launch_result launch = client->new_launch(
+        request.serialized_request,
+        workspace::Launch_platform::WINDOWS,
+        std::move(launch_configuration),
+        workspace::Terminal_worker_neutral_configuration{});
+    std::optional<workspace::Terminal_owner_custody_snapshot> running;
+    ok &= check(
+        launch.outcome == workspace::Terminal_owner_launch_outcome::ADMITTED &&
+            wait_until(
+                [&client, &running]() {
+                    running = client->custody("client-envelope-session");
+                    return running &&
+                        running->state ==
+                            workspace::Terminal_owner_custody_state::RUNNING &&
+                        running->attachment.live;
+                },
+                20000),
+        "the exact common envelope must reach a running neutral worker");
+    if (!ok || !running) {
+        return false;
+    }
+
+    const vnm::Framebuffer_reader reader(std::filesystem::path(
+        running->attachment.framebuffer_path));
+    ok &= check(
+        reader.valid() && reader.max_width() == 200 &&
+            reader.max_height() == 113 &&
+            reader.store_generation() ==
+                running->attachment.store_generation,
+        "the worker must apply the nondefault common surface extents before "
+        "native start");
+    const bool captured = wait_until(
+        [&directory]() {
+            const QFileInfoList segments = QDir(directory.path()).entryInfoList(
+                {QStringLiteral("owner-envelope-capture*.raw")},
+                QDir::Files);
+            return std::any_of(
+                segments.begin(),
+                segments.end(),
+                [](const QFileInfo& segment) {
+                    QFile file(segment.absoluteFilePath());
+                    return file.open(QIODevice::ReadOnly) &&
+                        file.readAll().contains("workspace-envelope-capture");
+                });
+        },
+        10000);
+    ok &= check(
+        captured,
+        "the worker must apply the exact output-capture configuration before "
+        "native output");
+    ok &= check(
+        client->request_close(
+            running->session_identity,
+            running->generation) ==
+                workspace::Terminal_owner_update_outcome::APPLIED &&
+            wait_until(
+                [&client]() { return client->custodies().empty(); },
+                15000),
+        "the exact-envelope fixture must close and settle normally");
     client.reset();
     return ok;
 }
@@ -661,6 +797,7 @@ int main(int argc, char* argv[])
     ok &= rejected_lower_close_is_a_bounded_service_failure();
     ok &= unauthorized_invitation_is_rejected();
     ok &= scoped_owner_and_attach_existing();
+    ok &= common_surface_and_capture_reach_the_neutral_provider();
     ok &= unprotected_disconnect_closes_and_drains();
     return ok ? 0 : 1;
 }

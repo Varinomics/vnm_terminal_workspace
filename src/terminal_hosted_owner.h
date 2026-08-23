@@ -2,6 +2,8 @@
 
 #include "terminal_owner_proxy_gate.h"
 
+#include "vnm_terminal_workspace/terminal_worker_envelope.h"
+
 #include "vnm_control_router.h"
 #include "vnm_hosted_worker_session.h"
 
@@ -42,6 +44,20 @@ struct Terminal_hosted_owner_configuration
     QString host_executable_path;
     QString worker_dll_path;
     QString provider_namespace;
+    std::string package_id;
+    std::string family_id;
+    std::vector<Terminal_worker_package_capability> capabilities;
+    std::vector<std::string> product_environment_names;
+    std::function<std::optional<std::string>(
+        const Terminal_worker_envelope&,
+        std::string_view)> encode_parameters;
+};
+
+struct Terminal_hosted_message_submission_result
+{
+    Terminal_proxy_gate_outcome routing =
+        Terminal_proxy_gate_outcome::AUTHORITY_REJECTED;
+    std::optional<Terminal_worker_message_submission_result> submission;
 };
 
 struct Terminal_hosted_owner_test_hooks
@@ -66,10 +82,13 @@ public:
     Terminal_hosted_launch_result launch(
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
-        std::span<const std::string_view> additional_reserved_names = {},
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment = std::nullopt,
-        std::shared_ptr<Terminal_lifetime_capability> lifetime_capability = {});
+        std::shared_ptr<Terminal_lifetime_capability> lifetime_capability = {},
+        Terminal_worker_surface_configuration surface_configuration = {},
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture = std::nullopt,
+        std::string canonical_product_configuration = {});
     Terminal_owner_update_result request_close(
         const std::string& session_identity,
         std::uint64_t generation,
@@ -94,6 +113,13 @@ public:
         std::uint64_t generation,
         std::uint64_t attachment_revision,
         const Terminal_remote_state_message& message);
+    [[nodiscard]] Terminal_hosted_message_submission_result submit_message(
+        std::uint64_t caller_transport_process_id,
+        VNM_viewer_authority_epoch expected_epoch,
+        const std::string& session_identity,
+        std::uint64_t generation,
+        std::uint64_t attachment_revision,
+        std::span<const std::uint8_t> message_utf8);
 
     [[nodiscard]] std::optional<Terminal_custody_snapshot> custody(
         const std::string& session_identity) const;
@@ -111,7 +137,10 @@ private:
     QString worker_payload(
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
-        std::span<const std::string_view> additional_reserved_names,
+        const Terminal_worker_surface_configuration& surface_configuration,
+        const std::optional<Terminal_worker_output_capture_configuration>&
+            output_capture,
+        std::string_view canonical_product_configuration,
         const std::optional<
             std::vector<environment_policy::Environment_entry>>&
                 authorized_environment) const;
@@ -144,6 +173,9 @@ private:
     void send_state(
         Live_session& live,
         const Terminal_remote_state_message& message);
+    Terminal_worker_message_submission_result send_message(
+        Live_session& live,
+        std::span<const std::uint8_t> message_utf8);
 
     Terminal_hosted_owner_configuration m_configuration;
     Terminal_hosted_owner_test_hooks m_test_hooks;

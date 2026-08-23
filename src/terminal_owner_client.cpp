@@ -84,6 +84,94 @@ void set_connect_result(
     }
 }
 
+void clear_string(std::string& value)
+{
+    volatile char* bytes = value.data();
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        bytes[index] = '\0';
+    }
+    value.clear();
+}
+
+void clear_environment_values(
+    std::optional<std::vector<environment_policy::Environment_entry>>& entries)
+{
+    if (!entries) {
+        return;
+    }
+    for (environment_policy::Environment_entry& entry : *entries) {
+        clear_string(entry.value);
+    }
+    entries.reset();
+}
+
+void clear_bytes(QByteArray& bytes)
+{
+    volatile char* data = bytes.data();
+    for (qsizetype index = 0; index < bytes.size(); ++index) {
+        data[index] = '\0';
+    }
+    bytes.clear();
+}
+
+class Sensitive_byte_array_guard
+{
+public:
+    explicit Sensitive_byte_array_guard(QByteArray& bytes)
+    :
+        m_bytes(bytes)
+    {}
+
+    ~Sensitive_byte_array_guard()
+    {
+        clear_bytes(m_bytes);
+    }
+
+    Sensitive_byte_array_guard(const Sensitive_byte_array_guard&) = delete;
+    Sensitive_byte_array_guard& operator=(
+        const Sensitive_byte_array_guard&) = delete;
+
+private:
+    QByteArray& m_bytes;
+};
+
+class Sensitive_environment_guard
+{
+public:
+    explicit Sensitive_environment_guard(
+        std::optional<
+            std::vector<environment_policy::Environment_entry>>& environment)
+    :
+        m_environment(environment)
+    {}
+
+    ~Sensitive_environment_guard()
+    {
+        clear_environment_values(m_environment);
+    }
+
+    Sensitive_environment_guard(const Sensitive_environment_guard&) = delete;
+    Sensitive_environment_guard& operator=(
+        const Sensitive_environment_guard&) = delete;
+
+private:
+    std::optional<std::vector<environment_policy::Environment_entry>>&
+        m_environment;
+};
+
+class Sensitive_string_guard
+{
+public:
+    explicit Sensitive_string_guard(std::string& value) : m_value(value) {}
+    ~Sensitive_string_guard() { clear_string(m_value); }
+
+    Sensitive_string_guard(const Sensitive_string_guard&) = delete;
+    Sensitive_string_guard& operator=(const Sensitive_string_guard&) = delete;
+
+private:
+    std::string& m_value;
+};
+
 bool configuration_valid(
     const Terminal_owner_client_configuration& configuration)
 {
@@ -125,13 +213,15 @@ bool response_ok(QDataStream& stream)
 
 struct Terminal_owner_client::Impl
 {
-    std::optional<QByteArray> transact(const QByteArray& payload)
+    std::optional<QByteArray> transact(QByteArray payload)
     {
+        Sensitive_byte_array_guard payload_guard(payload);
         if (socket.state() != QLocalSocket::ConnectedState) {
             return std::nullopt;
         }
         QDeadlineTimer deadline(timeout);
-        const QByteArray framed = detail::frame_terminal_owner_message(payload);
+        QByteArray framed = detail::frame_terminal_owner_message(payload);
+        Sensitive_byte_array_guard framed_guard(framed);
         if (socket.write(framed) != framed.size()) {
             return std::nullopt;
         }
@@ -264,7 +354,7 @@ std::unique_ptr<Terminal_owner_client> Terminal_owner_client::connect(
     writer
         << static_cast<quint64>(identity->native_process_id)
         << static_cast<quint64>(identity->native_process_creation_identity);
-    const auto response = impl->transact(request);
+    const auto response = impl->transact(std::move(request));
     if (!response) {
         set_connect_result(
             outcome,
@@ -325,10 +415,34 @@ Terminal_owner_viewer_epoch Terminal_owner_client::viewer_epoch() const noexcept
 Terminal_owner_launch_result Terminal_owner_client::new_launch(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment)
 {
+    return new_launch_for_fixed_package(
+        serialized_request,
+        platform,
+        {},
+        std::nullopt,
+        {},
+        std::move(authorized_environment));
+}
+
+Terminal_owner_launch_result
+Terminal_owner_client::new_launch_for_fixed_package(
+    std::span<const std::uint8_t> serialized_request,
+    Launch_platform platform,
+    Terminal_worker_surface_configuration surface_configuration,
+    std::optional<Terminal_worker_output_capture_configuration> output_capture,
+    std::string canonical_product_configuration,
+    std::optional<std::vector<environment_policy::Environment_entry>>
+        authorized_environment)
+{
+    Sensitive_environment_guard environment_guard(authorized_environment);
+    Sensitive_string_guard configuration_guard(
+        canonical_product_configuration);
+    if (!valid_launch_platform(platform)) {
+        return {Terminal_owner_launch_outcome::INVALID_REQUEST, {}, 0U};
+    }
     QByteArray request;
     auto writer = detail::make_terminal_owner_writer(request);
     write_request_prefix(writer, Terminal_owner_wire_operation::NEW_LAUNCH);
@@ -336,10 +450,11 @@ Terminal_owner_launch_result Terminal_owner_client::new_launch(
         reinterpret_cast<const char*>(serialized_request.data()),
         static_cast<qsizetype>(serialized_request.size()));
     writer << static_cast<quint32>(platform);
-    writer << static_cast<quint32>(additional_reserved_names.size());
-    for (const std::string_view name : additional_reserved_names) {
-        detail::write_string(writer, std::string(name));
-    }
+    detail::write_launch_configuration(
+        writer,
+        surface_configuration,
+        output_capture,
+        canonical_product_configuration);
     writer << authorized_environment.has_value();
     if (authorized_environment) {
         writer << static_cast<quint32>(authorized_environment->size());
@@ -348,7 +463,7 @@ Terminal_owner_launch_result Terminal_owner_client::new_launch(
             detail::write_string(writer, entry.value);
         }
     }
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return {Terminal_owner_launch_outcome::HOST_START_REJECTED, {}, 0U};
     }
@@ -372,7 +487,7 @@ Terminal_owner_update_outcome Terminal_owner_client::request_close(
     write_request_prefix(writer, Terminal_owner_wire_operation::REQUEST_CLOSE);
     detail::write_string(writer, session_identity);
     writer << static_cast<quint64>(generation);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return Terminal_owner_update_outcome::REJECTED;
     }
@@ -395,7 +510,7 @@ std::optional<Terminal_owner_custody_snapshot> Terminal_owner_client::custody(
     auto writer = detail::make_terminal_owner_writer(request);
     write_request_prefix(writer, Terminal_owner_wire_operation::CUSTODY);
     detail::write_string(writer, session_identity);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return std::nullopt;
     }
@@ -420,7 +535,7 @@ std::vector<Terminal_owner_custody_snapshot> Terminal_owner_client::custodies()
     QByteArray request;
     auto writer = detail::make_terminal_owner_writer(request);
     write_request_prefix(writer, Terminal_owner_wire_operation::CUSTODIES);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return {};
     }
@@ -451,7 +566,7 @@ Terminal_owner_atomic_snapshot Terminal_owner_client::atomic_snapshot()
     QByteArray request;
     auto writer = detail::make_terminal_owner_writer(request);
     write_request_prefix(writer, Terminal_owner_wire_operation::ATOMIC_SNAPSHOT);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return {};
     }
@@ -509,7 +624,7 @@ Terminal_owner_proxy_outcome Terminal_owner_client::attach_existing(
     writer
         << static_cast<quint64>(generation)
         << static_cast<quint64>(attachment_revision);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return Terminal_owner_proxy_outcome::AUTHORITY_REJECTED;
     }
@@ -549,7 +664,7 @@ Terminal_owner_proxy_outcome Terminal_owner_client::forward_input(
         << message.scroll_dy
         << QByteArray(message.text_utf8.data(), message.text_utf8.size())
         << static_cast<quint64>(message.timestamp);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return Terminal_owner_proxy_outcome::AUTHORITY_REJECTED;
     }
@@ -583,7 +698,7 @@ Terminal_owner_proxy_outcome Terminal_owner_client::forward_state(
         << static_cast<qint32>(message.height)
         << message.scale_factor
         << static_cast<quint8>(message.value);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return Terminal_owner_proxy_outcome::AUTHORITY_REJECTED;
     }
@@ -599,6 +714,65 @@ Terminal_owner_proxy_outcome Terminal_owner_client::forward_state(
         : Terminal_owner_proxy_outcome::AUTHORITY_REJECTED;
 }
 
+Terminal_owner_message_submission_result Terminal_owner_client::submit_message(
+    const std::string& session_identity,
+    std::uint64_t generation,
+    std::uint64_t attachment_revision,
+    std::span<const std::uint8_t> message_utf8)
+{
+    if (message_utf8.size() > detail::k_terminal_owner_maximum_frame_bytes) {
+        return {};
+    }
+    QByteArray request;
+    auto writer = detail::make_terminal_owner_writer(request);
+    write_request_prefix(writer, Terminal_owner_wire_operation::SUBMIT_MESSAGE);
+    detail::write_string(writer, session_identity);
+    writer
+        << static_cast<quint64>(generation)
+        << static_cast<quint64>(attachment_revision)
+        << QByteArray(
+            reinterpret_cast<const char*>(message_utf8.data()),
+            static_cast<qsizetype>(message_utf8.size()));
+    const auto response = m_impl->transact(std::move(request));
+    if (!response) {
+        return {};
+    }
+    QByteArray response_bytes = *response;
+    auto reader = detail::make_terminal_owner_reader(response_bytes);
+    quint32 routing = 0U;
+    bool has_submission = false;
+    if (!response_ok(reader)) {
+        return {};
+    }
+    reader >> routing >> has_submission;
+    if (reader.status() != QDataStream::Ok ||
+        routing > static_cast<quint32>(
+            Terminal_owner_proxy_outcome::INVALID_MESSAGE))
+    {
+        return {};
+    }
+    Terminal_owner_message_submission_result result;
+    result.routing = static_cast<Terminal_owner_proxy_outcome>(routing);
+    if (has_submission) {
+        quint32 outcome = 0U;
+        std::string error;
+        reader >> outcome;
+        if (!detail::read_string(reader, error) ||
+            outcome > static_cast<quint32>(
+                Terminal_worker_message_submission_outcome::INDETERMINATE))
+        {
+            return {};
+        }
+        result.submission = Terminal_worker_message_submission_result{
+            static_cast<Terminal_worker_message_submission_outcome>(outcome),
+            std::move(error),
+        };
+    }
+    return reader.status() == QDataStream::Ok
+        ? result
+        : Terminal_owner_message_submission_result{};
+}
+
 bool Terminal_owner_client::contains_unprotected_settlement(
     const std::string& session_identity,
     std::uint64_t generation)
@@ -610,7 +784,7 @@ bool Terminal_owner_client::contains_unprotected_settlement(
         Terminal_owner_wire_operation::CONTAINS_SETTLEMENT);
     detail::write_string(writer, session_identity);
     writer << static_cast<quint64>(generation);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return false;
     }
@@ -635,7 +809,7 @@ bool Terminal_owner_client::acknowledge_unprotected_settlement(
         Terminal_owner_wire_operation::ACKNOWLEDGE_SETTLEMENT);
     detail::write_string(writer, session_identity);
     writer << static_cast<quint64>(generation);
-    const auto response = m_impl->transact(request);
+    const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return false;
     }

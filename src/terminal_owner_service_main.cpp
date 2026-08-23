@@ -1,4 +1,4 @@
-#include "vnm_terminal_workspace/terminal_owner_host.h"
+#include "vnm_terminal_workspace/terminal_worker_composition.h"
 
 #include "terminal_owner_process_identity.h"
 #include "terminal_owner_service_policy.h"
@@ -27,10 +27,134 @@
 #include <vector>
 
 namespace vnm::terminal_workspace {
+
+namespace detail {
+
+struct Terminal_owner_service_access
+{
+    static std::unique_ptr<Terminal_owner_host> make_host(
+        Terminal_owner_host_configuration configuration,
+        const Terminal_worker_fixed_package_binding& binding)
+    {
+        return std::unique_ptr<Terminal_owner_host>(
+            new Terminal_owner_host(std::move(configuration), binding));
+    }
+
+    static Terminal_owner_launch_result new_launch(
+        Terminal_owner_host& host,
+        std::span<const std::uint8_t> serialized_request,
+        Launch_platform platform,
+        Terminal_worker_surface_configuration surface_configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture,
+        std::string canonical_product_configuration,
+        std::optional<std::vector<environment_policy::Environment_entry>>
+            authorized_environment)
+    {
+        return host.new_launch_for_fixed_package(
+            serialized_request,
+            platform,
+            std::move(surface_configuration),
+            std::move(output_capture),
+            std::move(canonical_product_configuration),
+            std::move(authorized_environment));
+    }
+};
+
+} // namespace detail
+
 namespace {
 
 using detail::Terminal_owner_wire_operation;
 using detail::Terminal_owner_wire_status;
+
+void clear_string(std::string& value)
+{
+    volatile char* bytes = value.data();
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        bytes[index] = '\0';
+    }
+    value.clear();
+}
+
+void clear_bytes(QByteArray& bytes)
+{
+    volatile char* data = bytes.data();
+    for (qsizetype index = 0; index < bytes.size(); ++index) {
+        data[index] = '\0';
+    }
+    bytes.clear();
+}
+
+void clear_environment_values(
+    std::optional<std::vector<environment_policy::Environment_entry>>& entries)
+{
+    if (!entries) {
+        return;
+    }
+    for (environment_policy::Environment_entry& entry : *entries) {
+        clear_string(entry.value);
+    }
+    entries.reset();
+}
+
+class Sensitive_byte_array_guard
+{
+public:
+    explicit Sensitive_byte_array_guard(QByteArray& bytes)
+    :
+        m_bytes(bytes)
+    {}
+
+    ~Sensitive_byte_array_guard()
+    {
+        clear_bytes(m_bytes);
+    }
+
+    Sensitive_byte_array_guard(const Sensitive_byte_array_guard&) = delete;
+    Sensitive_byte_array_guard& operator=(
+        const Sensitive_byte_array_guard&) = delete;
+
+private:
+    QByteArray& m_bytes;
+};
+
+class Sensitive_string_guard
+{
+public:
+    explicit Sensitive_string_guard(std::string& value) : m_value(value) {}
+    ~Sensitive_string_guard() { clear_string(m_value); }
+
+    Sensitive_string_guard(const Sensitive_string_guard&) = delete;
+    Sensitive_string_guard& operator=(const Sensitive_string_guard&) = delete;
+
+private:
+    std::string& m_value;
+};
+
+class Sensitive_environment_guard
+{
+public:
+    explicit Sensitive_environment_guard(
+        std::optional<
+            std::vector<environment_policy::Environment_entry>>& environment)
+    :
+        m_environment(environment)
+    {}
+
+    ~Sensitive_environment_guard()
+    {
+        clear_environment_values(m_environment);
+    }
+
+    Sensitive_environment_guard(const Sensitive_environment_guard&) = delete;
+    Sensitive_environment_guard& operator=(
+        const Sensitive_environment_guard&) = delete;
+
+private:
+    std::optional<std::vector<environment_policy::Environment_entry>>&
+        m_environment;
+};
 
 struct Owner_arguments
 {
@@ -134,12 +258,15 @@ class Terminal_owner_service
 public:
     Terminal_owner_service(
         QCoreApplication& application,
-        Owner_arguments arguments)
+        Owner_arguments arguments,
+        detail::Terminal_worker_fixed_package_binding binding)
     :
         m_application(application),
         m_arguments(std::move(arguments)),
         m_lock(m_arguments.lock_path),
-        m_host(m_arguments.host)
+        m_host(detail::Terminal_owner_service_access::make_host(
+            m_arguments.host,
+            binding))
     {
         m_invitation_timeout.setSingleShot(true);
         m_invitation_timeout.setInterval(10000);
@@ -158,13 +285,18 @@ public:
             &QTimer::timeout,
             &m_application,
             [this]() {
-                if (!m_host.custodies().empty()) {
+                if (!m_host->custodies().empty()) {
                     return;
                 }
-                m_host.purge_unprotected_settlements_for_shutdown();
+                m_host->purge_unprotected_settlements_for_shutdown();
                 m_settlement_poll.stop();
                 m_application.exit(EXIT_SUCCESS);
             });
+    }
+
+    ~Terminal_owner_service()
+    {
+        clear_bytes(m_read_buffer);
     }
 
     bool listen()
@@ -224,7 +356,9 @@ private:
 
     void read_socket()
     {
-        m_read_buffer.append(m_socket->readAll());
+        QByteArray incoming = m_socket->readAll();
+        Sensitive_byte_array_guard incoming_guard(incoming);
+        m_read_buffer.append(incoming);
         for (;;) {
             QByteArray request;
             if (!detail::take_terminal_owner_frame(m_read_buffer, request)) {
@@ -246,6 +380,7 @@ private:
 
     void dispatch(QByteArray& request)
     {
+        Sensitive_byte_array_guard request_guard(request);
         auto reader = detail::make_terminal_owner_reader(request);
         quint32 version = 0U;
         quint32 operation_value = 0U;
@@ -300,6 +435,9 @@ private:
         case Terminal_owner_wire_operation::ATOMIC_SNAPSHOT:
             atomic_snapshot(reader);
             break;
+        case Terminal_owner_wire_operation::SUBMIT_MESSAGE:
+            submit_message(reader);
+            break;
         case Terminal_owner_wire_operation::HANDSHAKE:
         default:
             send_status(Terminal_owner_wire_status::MALFORMED);
@@ -344,14 +482,14 @@ private:
             reject_handshake(Terminal_owner_wire_status::UNAUTHORIZED, 6U);
             return;
         }
-        if (m_host.bind_initial_viewer(*peer) !=
+        if (m_host->bind_initial_viewer(*peer) !=
             Terminal_owner_viewer_bind_outcome::BOUND)
         {
             reject_handshake(Terminal_owner_wire_status::UNAUTHORIZED, 7U);
             return;
         }
         m_arguments.viewer_identity = *peer;
-        m_epoch = m_host.viewer_authority_snapshot().epoch;
+        m_epoch = m_host->viewer_authority_snapshot().epoch;
         if (m_epoch == 0U) {
             reject_handshake(Terminal_owner_wire_status::FAILED, 8U);
             return;
@@ -385,31 +523,37 @@ private:
     void new_launch(QDataStream& reader)
     {
         QByteArray serialized_request;
+        Sensitive_byte_array_guard request_guard(serialized_request);
         quint32 platform_value = 0U;
-        quint32 reserved_count = 0U;
         bool has_environment = false;
-        reader >> serialized_request >> platform_value >> reserved_count;
-        if (reader.status() != QDataStream::Ok ||
-            serialized_request.size() >
-                static_cast<qsizetype>(detail::k_terminal_owner_maximum_frame_bytes) ||
-            reserved_count > 1024U)
+        Terminal_worker_surface_configuration surface_configuration;
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture;
+        std::string product_configuration;
+        Sensitive_string_guard product_guard(product_configuration);
+        reader >> serialized_request >> platform_value;
+        if (!detail::read_launch_configuration(
+                reader,
+                surface_configuration,
+                output_capture,
+                product_configuration))
         {
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        std::vector<std::string> reserved_names;
-        reserved_names.reserve(reserved_count);
-        for (quint32 index = 0U; index < reserved_count; ++index) {
-            std::string name;
-            if (!detail::read_string(reader, name)) {
-                send_status(Terminal_owner_wire_status::MALFORMED);
-                return;
-            }
-            reserved_names.push_back(std::move(name));
-        }
         reader >> has_environment;
+        if (reader.status() != QDataStream::Ok ||
+            serialized_request.size() >
+                static_cast<qsizetype>(detail::k_terminal_owner_maximum_frame_bytes) ||
+            platform_value >
+                static_cast<quint32>(Launch_platform::POSIX))
+        {
+            send_status(Terminal_owner_wire_status::MALFORMED);
+            return;
+        }
         std::optional<std::vector<environment_policy::Environment_entry>>
             environment;
+        Sensitive_environment_guard environment_guard(environment);
         if (has_environment) {
             quint32 environment_count = 0U;
             reader >> environment_count;
@@ -434,17 +578,16 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        std::vector<std::string_view> reserved_views;
-        reserved_views.reserve(reserved_names.size());
-        for (const std::string& name : reserved_names) {
-            reserved_views.push_back(name);
-        }
-        const Terminal_owner_launch_result result = m_host.new_launch(
+        const Terminal_owner_launch_result result =
+            detail::Terminal_owner_service_access::new_launch(
+            *m_host,
             std::span<const std::uint8_t>(
                 reinterpret_cast<const std::uint8_t*>(serialized_request.data()),
                 static_cast<std::size_t>(serialized_request.size())),
             static_cast<Launch_platform>(platform_value),
-            reserved_views,
+            std::move(surface_configuration),
+            std::move(output_capture),
+            std::move(product_configuration),
             std::move(environment));
         QByteArray response;
         auto writer = detail::make_terminal_owner_writer(response);
@@ -466,7 +609,7 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        send_enum(m_host.request_close(session_identity, generation));
+        send_enum(m_host->request_close(session_identity, generation));
     }
 
     void custody(QDataStream& reader)
@@ -476,7 +619,7 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        const auto value = m_host.custody(session_identity);
+        const auto value = m_host->custody(session_identity);
         QByteArray response;
         auto writer = detail::make_terminal_owner_writer(response);
         write_response_prefix(writer, Terminal_owner_wire_status::OK);
@@ -493,7 +636,7 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        const auto values = m_host.custodies();
+        const auto values = m_host->custodies();
         QByteArray response;
         auto writer = detail::make_terminal_owner_writer(response);
         write_response_prefix(writer, Terminal_owner_wire_status::OK);
@@ -518,7 +661,7 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        send_enum(m_host.attach_existing(
+        send_enum(m_host->attach_existing(
             m_arguments.viewer_identity.transport_process_id,
             m_epoch,
             session_identity,
@@ -532,7 +675,7 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        const Terminal_owner_atomic_snapshot value = m_host.atomic_snapshot(
+        const Terminal_owner_atomic_snapshot value = m_host->atomic_snapshot(
             std::chrono::steady_clock::now());
         QByteArray response;
         auto writer = detail::make_terminal_owner_writer(response);
@@ -591,7 +734,7 @@ private:
         message.scroll_dy = scroll_dy;
         std::copy(text.cbegin(), text.cend(), message.text_utf8.begin());
         message.timestamp = timestamp;
-        send_enum(m_host.forward_input(
+        send_enum(m_host->forward_input(
             m_arguments.viewer_identity.transport_process_id,
             m_epoch,
             session_identity,
@@ -621,13 +764,55 @@ private:
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
-        send_enum(m_host.forward_state(
+        send_enum(m_host->forward_state(
             m_arguments.viewer_identity.transport_process_id,
             m_epoch,
             session_identity,
             generation,
             revision,
             {state_type, width, height, scale_factor, value}));
+    }
+
+    void submit_message(QDataStream& reader)
+    {
+        std::string session_identity;
+        quint64 generation = 0U;
+        quint64 revision = 0U;
+        QByteArray message;
+        Sensitive_byte_array_guard message_guard(message);
+        if (!detail::read_string(reader, session_identity)) {
+            send_status(Terminal_owner_wire_status::MALFORMED);
+            return;
+        }
+        reader >> generation >> revision >> message;
+        if (reader.status() != QDataStream::Ok ||
+            message.size() > static_cast<qsizetype>(
+                detail::k_terminal_owner_maximum_frame_bytes))
+        {
+            send_status(Terminal_owner_wire_status::MALFORMED);
+            return;
+        }
+        const Terminal_owner_message_submission_result result =
+            m_host->submit_message(
+                m_arguments.viewer_identity.transport_process_id,
+                m_epoch,
+                session_identity,
+                generation,
+                revision,
+                std::span<const std::uint8_t>(
+                    reinterpret_cast<const std::uint8_t*>(message.data()),
+                    static_cast<std::size_t>(message.size())));
+        QByteArray response;
+        auto writer = detail::make_terminal_owner_writer(response);
+        write_response_prefix(writer, Terminal_owner_wire_status::OK);
+        writer
+            << static_cast<quint32>(result.routing)
+            << result.submission.has_value();
+        if (result.submission) {
+            writer << static_cast<quint32>(result.submission->outcome);
+            detail::write_string(writer, result.submission->error);
+        }
+        send_response(response);
     }
 
     void settlement(QDataStream& reader, bool acknowledge)
@@ -645,11 +830,11 @@ private:
         }
         const auto now = std::chrono::steady_clock::now();
         const bool result = acknowledge
-            ? m_host.acknowledge_unprotected_settlement(
+            ? m_host->acknowledge_unprotected_settlement(
                 session_identity,
                 generation,
                 now)
-            : m_host.contains_unprotected_settlement(
+            : m_host->contains_unprotected_settlement(
                 session_identity,
                 generation,
                 now);
@@ -692,27 +877,27 @@ private:
     void viewer_disconnected()
     {
         m_socket = nullptr;
-        m_read_buffer.clear();
+        clear_bytes(m_read_buffer);
         if (!m_authorized) {
             m_application.exit(EXIT_FAILURE);
             return;
         }
-        static_cast<void>(m_host.note_viewer_transport_departure(
+        static_cast<void>(m_host->note_viewer_transport_departure(
             m_arguments.viewer_identity));
         std::vector<Terminal_owner_update_outcome> close_results;
-        for (const auto& custody : m_host.custodies()) {
-            close_results.push_back(m_host.request_close(
+        for (const auto& custody : m_host->custodies()) {
+            close_results.push_back(m_host->request_close(
                 custody.session_identity,
                 custody.generation));
         }
         const detail::Terminal_owner_shutdown_disposition disposition =
             detail::owner_shutdown_disposition(
                 close_results,
-                m_host.custodies().empty());
+                m_host->custodies().empty());
         if (disposition ==
             detail::Terminal_owner_shutdown_disposition::COMPLETE)
         {
-            m_host.purge_unprotected_settlements_for_shutdown();
+            m_host->purge_unprotected_settlements_for_shutdown();
             m_application.exit(EXIT_SUCCESS);
             return;
         }
@@ -728,7 +913,7 @@ private:
     QCoreApplication& m_application;
     Owner_arguments m_arguments;
     QLockFile m_lock;
-    Terminal_owner_host m_host;
+    std::unique_ptr<Terminal_owner_host> m_host;
     QLocalServer m_server;
     QLocalSocket* m_socket = nullptr;
     QByteArray m_read_buffer;
@@ -745,12 +930,14 @@ bool complete_remote_runtime_shutdown()
 }
 
 } // namespace
-} // namespace vnm::terminal_workspace
 
-int main(int argc, char* argv[])
+int detail::run_terminal_owner_service_program(
+    int argc,
+    char** argv,
+    detail::Terminal_worker_fixed_package_binding binding)
 {
     QCoreApplication application(argc, argv);
-    const auto arguments = vnm::terminal_workspace::parse_arguments(
+    const auto arguments = parse_arguments(
         application.arguments());
     if (!arguments.valid()) {
         return EXIT_FAILURE;
@@ -764,15 +951,18 @@ int main(int argc, char* argv[])
     }
     int result = EXIT_FAILURE;
     {
-        vnm::terminal_workspace::Terminal_owner_service service(
+        Terminal_owner_service service(
             application,
-            arguments);
+            arguments,
+            std::move(binding));
         if (service.listen()) {
             result = application.exec();
         }
     }
-    if (!vnm::terminal_workspace::complete_remote_runtime_shutdown()) {
+    if (!complete_remote_runtime_shutdown()) {
         result = EXIT_FAILURE;
     }
     return result;
 }
+
+} // namespace vnm::terminal_workspace

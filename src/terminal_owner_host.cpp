@@ -1,4 +1,5 @@
 #include "vnm_terminal_workspace/terminal_owner_host.h"
+#include "vnm_terminal_workspace/terminal_worker_composition.h"
 
 #include "terminal_hosted_owner.h"
 
@@ -294,7 +295,9 @@ Terminal_owner_viewer_identity viewer_identity(
 
 struct Terminal_owner_host::Impl
 {
-    explicit Impl(Terminal_owner_host_configuration configuration)
+    Impl(
+        Terminal_owner_host_configuration configuration,
+        const detail::Terminal_worker_fixed_package_binding& binding)
     :
         owner({
             QString::fromStdString(
@@ -302,6 +305,11 @@ struct Terminal_owner_host::Impl
             QString::fromStdString(
                 configuration.terminal_worker_library_path),
             QString::fromStdString(configuration.provider_namespace),
+            binding.package_id,
+            binding.family_id,
+            binding.capabilities,
+            binding.product_environment_names,
+            binding.encode_parameters,
         })
     {}
 
@@ -311,7 +319,17 @@ struct Terminal_owner_host::Impl
 Terminal_owner_host::Terminal_owner_host(
     Terminal_owner_host_configuration configuration)
 :
-    m_impl(std::make_unique<Impl>(std::move(configuration)))
+    Terminal_owner_host(
+        std::move(configuration),
+        detail::terminal_worker_fixed_package_binding<
+            Neutral_terminal_worker_package_policy>())
+{}
+
+Terminal_owner_host::Terminal_owner_host(
+    Terminal_owner_host_configuration configuration,
+    const detail::Terminal_worker_fixed_package_binding& binding)
+:
+    m_impl(std::make_unique<Impl>(std::move(configuration), binding))
 {}
 
 Terminal_owner_host::~Terminal_owner_host() = default;
@@ -319,7 +337,6 @@ Terminal_owner_host::~Terminal_owner_host() = default;
 Terminal_owner_launch_result Terminal_owner_host::new_launch(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment,
     std::shared_ptr<Terminal_owner_lifetime_capability> lifetime_capability)
@@ -332,9 +349,38 @@ Terminal_owner_launch_result Terminal_owner_host::new_launch(
     const detail::Terminal_hosted_launch_result result = m_impl->owner.launch(
         serialized_request,
         platform,
-        additional_reserved_names,
         std::move(authorized_environment),
         std::move(adapter));
+    return {
+        launch_outcome(result.outcome),
+        result.session_identity,
+        result.generation,
+    };
+}
+
+Terminal_owner_launch_result Terminal_owner_host::new_launch_for_fixed_package(
+    std::span<const std::uint8_t> serialized_request,
+    Launch_platform platform,
+    Terminal_worker_surface_configuration surface_configuration,
+    std::optional<Terminal_worker_output_capture_configuration> output_capture,
+    std::string canonical_product_configuration,
+    std::optional<std::vector<environment_policy::Environment_entry>>
+        authorized_environment,
+    std::shared_ptr<Terminal_owner_lifetime_capability> lifetime_capability)
+{
+    std::shared_ptr<detail::Terminal_lifetime_capability> adapter;
+    if (lifetime_capability) {
+        adapter = std::make_shared<Lifetime_capability_adapter>(
+            std::move(lifetime_capability));
+    }
+    const detail::Terminal_hosted_launch_result result = m_impl->owner.launch(
+        serialized_request,
+        platform,
+        std::move(authorized_environment),
+        std::move(adapter),
+        std::move(surface_configuration),
+        std::move(output_capture),
+        std::move(canonical_product_configuration));
     return {
         launch_outcome(result.outcome),
         result.session_identity,
@@ -468,6 +514,28 @@ Terminal_owner_proxy_outcome Terminal_owner_host::forward_state(
             generation,
             attachment_revision,
             message));
+}
+
+Terminal_owner_message_submission_result Terminal_owner_host::submit_message(
+    std::uint64_t caller_transport_process_id,
+    Terminal_owner_viewer_epoch expected_epoch,
+    const std::string& session_identity,
+    std::uint64_t generation,
+    std::uint64_t attachment_revision,
+    std::span<const std::uint8_t> message_utf8)
+{
+    const detail::Terminal_hosted_message_submission_result result =
+        m_impl->owner.submit_message(
+            caller_transport_process_id,
+            expected_epoch,
+            session_identity,
+            generation,
+            attachment_revision,
+            message_utf8);
+    return {
+        proxy_outcome(result.routing),
+        result.submission,
+    };
 }
 
 Terminal_owner_viewer_transport_departure_outcome

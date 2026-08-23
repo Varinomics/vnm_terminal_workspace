@@ -81,6 +81,13 @@ enum class Launch_platform
     POSIX,
 };
 
+[[nodiscard]] constexpr bool valid_launch_platform(
+    Launch_platform platform) noexcept
+{
+    return platform == Launch_platform::WINDOWS ||
+        platform == Launch_platform::POSIX;
+}
+
 struct Pre_custody_cancellation
 {
     std::string identity;
@@ -121,13 +128,11 @@ struct Launch_request_result
 
 Launch_request_result prepare_terminal_launch_request(
     Terminal_launch_request request,
-    Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names = {});
+    Launch_platform platform);
 
 Launch_request_result decode_terminal_launch_request(
     std::span<const std::uint8_t> serialized_request,
-    Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names = {});
+    Launch_platform platform);
 
 Working_directory_advisory probe_terminal_working_directory(
     std::string_view working_directory,

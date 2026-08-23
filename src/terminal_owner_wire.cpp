@@ -9,6 +9,15 @@ namespace {
 
 constexpr qsizetype k_maximum_string_bytes = 1024 * 1024;
 
+void clear_bytes(QByteArray& bytes)
+{
+    volatile char* data = bytes.data();
+    for (qsizetype index = 0; index < bytes.size(); ++index) {
+        data[index] = '\0';
+    }
+    bytes.clear();
+}
+
 template<typename Enum>
 void write_enum(QDataStream& stream, Enum value)
 {
@@ -84,9 +93,11 @@ bool read_string(QDataStream& stream, std::string& value)
     if (stream.status() != QDataStream::Ok ||
         bytes.size() > k_maximum_string_bytes)
     {
+        clear_bytes(bytes);
         return false;
     }
     value.assign(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+    clear_bytes(bytes);
     return true;
 }
 
@@ -195,6 +206,114 @@ bool read_launch_result(
     return stream.status() == QDataStream::Ok;
 }
 
+void write_launch_configuration(
+    QDataStream& stream,
+    const Terminal_worker_surface_configuration& surface,
+    const std::optional<Terminal_worker_output_capture_configuration>& capture,
+    const std::string& canonical_product_configuration)
+{
+    stream
+        << static_cast<qint32>(surface.logical_width)
+        << static_cast<qint32>(surface.logical_height)
+        << static_cast<qint32>(surface.maximum_physical_width)
+        << static_cast<qint32>(surface.maximum_physical_height)
+        << surface.scale_factor;
+    write_string(stream, surface.settings.color_scheme);
+    write_string(stream, surface.settings.font_family);
+    stream << surface.settings.font_size;
+    write_enum(stream, surface.settings.text_renderer_mode);
+    write_enum(stream, surface.settings.lcd_subpixel_order);
+    stream << surface.settings.row_timestamp_tooltip_enabled;
+    stream << surface.settings.scrollback_limit.has_value();
+    if (surface.settings.scrollback_limit) {
+        stream << static_cast<qint32>(*surface.settings.scrollback_limit);
+    }
+    write_string(stream, surface.title);
+    write_enum(stream, surface.style);
+    stream << surface.scrollbar_width;
+    stream << capture.has_value();
+    if (capture) {
+        write_string(stream, capture->base_path);
+        stream << static_cast<quint64>(capture->maximum_bytes);
+    }
+    write_string(stream, canonical_product_configuration);
+}
+
+bool read_launch_configuration(
+    QDataStream& stream,
+    Terminal_worker_surface_configuration& surface,
+    std::optional<Terminal_worker_output_capture_configuration>& capture,
+    std::string& canonical_product_configuration)
+{
+    qint32 width = 0;
+    qint32 height = 0;
+    qint32 maximum_width = 0;
+    qint32 maximum_height = 0;
+    quint32 renderer = 0U;
+    quint32 subpixel = 0U;
+    bool has_scrollback = false;
+    qint32 scrollback = 0;
+    quint32 style = 0U;
+    bool has_capture = false;
+    stream
+        >> width >> height >> maximum_width >> maximum_height
+        >> surface.scale_factor;
+    if (!read_string(stream, surface.settings.color_scheme) ||
+        !read_string(stream, surface.settings.font_family))
+    {
+        return false;
+    }
+    stream
+        >> surface.settings.font_size
+        >> renderer
+        >> subpixel
+        >> surface.settings.row_timestamp_tooltip_enabled
+        >> has_scrollback;
+    if (has_scrollback) {
+        stream >> scrollback;
+        surface.settings.scrollback_limit = static_cast<int>(scrollback);
+    }
+    else {
+        surface.settings.scrollback_limit.reset();
+    }
+    if (!read_string(stream, surface.title)) {
+        return false;
+    }
+    stream >> style >> surface.scrollbar_width >> has_capture;
+    if (has_capture) {
+        Terminal_worker_output_capture_configuration value;
+        quint64 maximum_bytes = 0U;
+        if (!read_string(stream, value.base_path)) {
+            return false;
+        }
+        stream >> maximum_bytes;
+        value.maximum_bytes = static_cast<std::size_t>(maximum_bytes);
+        capture = std::move(value);
+    }
+    else {
+        capture.reset();
+    }
+    if (!read_string(stream, canonical_product_configuration) ||
+        renderer > static_cast<quint32>(
+            Terminal_worker_text_renderer_mode::GLYPH) ||
+        subpixel > static_cast<quint32>(
+            Terminal_worker_lcd_subpixel_order::VBGR) ||
+        style > static_cast<quint32>(Terminal_worker_style::DARK))
+    {
+        return false;
+    }
+    surface.logical_width = width;
+    surface.logical_height = height;
+    surface.maximum_physical_width = maximum_width;
+    surface.maximum_physical_height = maximum_height;
+    surface.settings.text_renderer_mode =
+        static_cast<Terminal_worker_text_renderer_mode>(renderer);
+    surface.settings.lcd_subpixel_order =
+        static_cast<Terminal_worker_lcd_subpixel_order>(subpixel);
+    surface.style = static_cast<Terminal_worker_style>(style);
+    return stream.status() == QDataStream::Ok;
+}
+
 QByteArray frame_terminal_owner_message(const QByteArray& payload)
 {
     QByteArray framed;
@@ -216,7 +335,7 @@ bool take_terminal_owner_frame(QByteArray& buffer, QByteArray& payload)
     if (stream.status() != QDataStream::Ok ||
         size > k_terminal_owner_maximum_frame_bytes)
     {
-        buffer.clear();
+        clear_bytes(buffer);
         payload.clear();
         return true;
     }
@@ -226,6 +345,10 @@ bool take_terminal_owner_frame(QByteArray& buffer, QByteArray& payload)
         return false;
     }
     payload = buffer.mid(static_cast<qsizetype>(sizeof(quint32)), size);
+    volatile char* data = buffer.data();
+    for (qsizetype index = 0; index < total; ++index) {
+        data[index] = '\0';
+    }
     buffer.remove(0, total);
     return true;
 }

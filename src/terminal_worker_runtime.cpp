@@ -118,7 +118,6 @@ Terminal_worker_run_result Terminal_worker_coordinator::run(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
     std::uint64_t hosted_generation,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment)
 {
@@ -126,7 +125,6 @@ Terminal_worker_run_result Terminal_worker_coordinator::run(
         serialized_request,
         platform,
         hosted_generation,
-        additional_reserved_names,
         std::move(authorized_environment),
         true);
 }
@@ -135,7 +133,6 @@ Terminal_worker_run_result Terminal_worker_coordinator::run_preinitialized(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
     std::uint64_t hosted_generation,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment)
 {
@@ -143,7 +140,6 @@ Terminal_worker_run_result Terminal_worker_coordinator::run_preinitialized(
         serialized_request,
         platform,
         hosted_generation,
-        additional_reserved_names,
         std::move(authorized_environment),
         false);
 }
@@ -152,7 +148,6 @@ Terminal_worker_run_result Terminal_worker_coordinator::run_impl(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
     std::uint64_t hosted_generation,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment,
     bool initialize_adapter)
@@ -171,8 +166,7 @@ Terminal_worker_run_result Terminal_worker_coordinator::run_impl(
 
     Launch_request_result decoded = decode_terminal_launch_request(
         serialized_request,
-        platform,
-        additional_reserved_names);
+        platform);
     if (!decoded.request) {
         terminate_once();
         return Terminal_worker_run_result::TERMINATED;

@@ -49,6 +49,13 @@ public:
         std::uint64_t generation,
         std::uint64_t attachment_revision,
         const std::function<void()>& send);
+    [[nodiscard]] Terminal_proxy_gate_outcome submit_message(
+        std::uint64_t caller_transport_process_id,
+        VNM_viewer_authority_epoch expected_epoch,
+        const std::string& session_identity,
+        std::uint64_t generation,
+        std::uint64_t attachment_revision,
+        const std::function<void()>& send);
 
     [[nodiscard]] VNM_viewer_transport_departure_outcome
         note_transport_departure(const VNM_viewer_identity& identity);

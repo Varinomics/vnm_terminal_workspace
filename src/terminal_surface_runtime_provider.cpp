@@ -1,15 +1,25 @@
 #include "terminal_worker_runtime_internal.h"
 
 #include "vnm_remote_ui_surface_runtime.h"
+#include "vnm_terminal/app_support/app_shortcuts.h"
 #include "vnm_terminal/app_support/app_settings.h"
+#include "vnm_terminal/app_support/terminal_search_bar.h"
 #include "vnm_terminal/app_support/terminal_scrollbar.h"
+#include "vnm_terminal/app_support/terminal_settings_controller.h"
+#include "vnm_terminal/app_support/terminal_settings_window.h"
+#include "vnm_terminal/backend_output_capture.h"
+#include "vnm_terminal/diagnostics/metrics_json.h"
+#include "vnm_terminal/terminal_message_submission.h"
 #include "vnm_terminal/vnm_terminal_surface.h"
 
 #include <QByteArray>
 #include <QDateTime>
 #include <QEventLoop>
+#include <QJsonObject>
 #include <QPointer>
+#include <QQmlEngine>
 #include <QQuickItem>
+#include <QQuickWindow>
 #include <QResource>
 #include <QThread>
 #include <QTimer>
@@ -38,6 +48,9 @@ using vnm_terminal::Terminal_process_start_request;
 
 constexpr std::chrono::seconds k_exit_observation_timeout{30};
 constexpr std::chrono::seconds k_termination_observation_timeout{5};
+constexpr qint64 k_terminal_output_activity_throttle_ms = 250;
+constexpr qsizetype k_backend_diagnostic_max_characters = 1024;
+constexpr qsizetype k_backend_diagnostic_scan_characters = 4096;
 constexpr char k_worker_qml_url[] =
     "qrc:/vnm_terminal_workspace/TerminalWorkerRoot.qml";
 
@@ -128,6 +141,14 @@ bool valid_configuration(
         strict_utf8(configuration.title).has_value();
 }
 
+bool valid_output_capture(
+    const std::optional<Terminal_worker_output_capture_configuration>& capture)
+{
+    return !capture ||
+        (!capture->base_path.empty() && capture->maximum_bytes > 0U &&
+         strict_utf8(capture->base_path).has_value());
+}
+
 vnm_terminal::terminal_app::Terminal_settings_snapshot terminal_settings(
     const Terminal_worker_settings& settings)
 {
@@ -143,6 +164,78 @@ vnm_terminal::terminal_app::Terminal_settings_snapshot terminal_settings(
         settings.row_timestamp_tooltip_enabled;
     snapshot.scrollback_limit = settings.scrollback_limit;
     return snapshot;
+}
+
+Terminal_worker_settings worker_settings(
+    const vnm_terminal::terminal_app::Terminal_settings_snapshot& snapshot)
+{
+    Terminal_worker_settings settings;
+    settings.color_scheme = snapshot.color_scheme.toStdString();
+    settings.font_family = snapshot.font_family.toStdString();
+    settings.font_size = snapshot.font_size;
+    settings.text_renderer_mode =
+        static_cast<Terminal_worker_text_renderer_mode>(
+            snapshot.text_renderer_mode);
+    settings.lcd_subpixel_order =
+        static_cast<Terminal_worker_lcd_subpixel_order>(
+            snapshot.lcd_subpixel_order);
+    settings.row_timestamp_tooltip_enabled =
+        snapshot.row_timestamp_tooltip_enabled;
+    settings.scrollback_limit = snapshot.scrollback_limit;
+    return settings;
+}
+
+QString bounded_backend_diagnostic(QString diagnostic)
+{
+    diagnostic.truncate(k_backend_diagnostic_scan_characters);
+    for (qsizetype index = 0; index < diagnostic.size(); ++index) {
+        const ushort character = diagnostic.at(index).unicode();
+        if (character < 0x20 || character == 0x7f) {
+            diagnostic[index] = QLatin1Char(' ');
+        }
+    }
+    diagnostic = diagnostic.simplified();
+    diagnostic.truncate(k_backend_diagnostic_max_characters);
+    return diagnostic;
+}
+
+std::optional<std::uint64_t> diagnostics_counter(
+    const QJsonObject& object,
+    const char* key)
+{
+    const QJsonValue value = object.value(QLatin1String(key));
+    if (!value.isString()) {
+        return std::nullopt;
+    }
+    bool valid = false;
+    const qulonglong counter = value.toString().toULongLong(&valid, 10);
+    return valid ? std::optional<std::uint64_t>{counter} : std::nullopt;
+}
+
+Terminal_worker_message_submission_outcome workspace_message_outcome(
+    vnm_terminal::Terminal_message_submission_outcome outcome)
+{
+    using Surface_outcome =
+        vnm_terminal::Terminal_message_submission_outcome;
+    switch (outcome) {
+        case Surface_outcome::ACCEPTED:
+            return Terminal_worker_message_submission_outcome::ACCEPTED;
+        case Surface_outcome::INVALID_UTF8:
+            return Terminal_worker_message_submission_outcome::INVALID_UTF8;
+        case Surface_outcome::INVALID_MESSAGE:
+            return Terminal_worker_message_submission_outcome::INVALID_MESSAGE;
+        case Surface_outcome::EMPTY_MESSAGE:
+            return Terminal_worker_message_submission_outcome::EMPTY_MESSAGE;
+        case Surface_outcome::MESSAGE_TOO_LARGE:
+            return Terminal_worker_message_submission_outcome::MESSAGE_TOO_LARGE;
+        case Surface_outcome::NOT_RUNNING:
+            return Terminal_worker_message_submission_outcome::NOT_RUNNING;
+        case Surface_outcome::QUEUE_LIMIT:
+            return Terminal_worker_message_submission_outcome::QUEUE_LIMIT;
+        case Surface_outcome::BACKEND_REJECTED:
+            return Terminal_worker_message_submission_outcome::BACKEND_REJECTED;
+    }
+    return Terminal_worker_message_submission_outcome::BACKEND_REJECTED;
 }
 
 class Remote_sink_bridge
@@ -379,15 +472,22 @@ struct Terminal_surface_runtime_adapter::Impl
 {
     Impl(
         Terminal_worker_surface_configuration worker_configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            worker_output_capture,
         Terminal_worker_remote_sink& worker_remote_sink,
         Terminal_worker_gui_dispatcher& worker_gui_dispatcher,
         Terminal_worker_termination& worker_termination,
+        Terminal_worker_complete_settings_sink& worker_complete_settings_sink,
+        Terminal_worker_diagnostic_observation_sink& worker_diagnostic_sink,
         Terminal_native_start_admission_hook native_start_admission)
     :
         configuration(std::move(worker_configuration)),
+        output_capture(std::move(worker_output_capture)),
         remote_sink(worker_remote_sink),
         gui_dispatcher(worker_gui_dispatcher),
         termination(worker_termination),
+        complete_settings_sink(worker_complete_settings_sink),
+        diagnostic_sink(worker_diagnostic_sink),
         admission_hook(std::move(native_start_admission)),
         sink_bridge(remote_sink)
     {}
@@ -416,6 +516,111 @@ struct Terminal_surface_runtime_adapter::Impl
         scrollbar->setSize(QSizeF(scrollbar_width, height));
     }
 
+    void publish_complete_settings()
+    {
+        if (surface == nullptr) {
+            return;
+        }
+        complete_settings_sink.accept_complete_settings(worker_settings(
+            vnm_terminal::terminal_app::terminal_settings_snapshot(*surface)));
+    }
+
+    void observe_first_output()
+    {
+        if (surface == nullptr || terminal_output_observed) {
+            return;
+        }
+        QJsonObject invalidation;
+        vnm_terminal::diagnostics::append_render_invalidation_metrics_json(
+            *surface,
+            invalidation);
+        first_output_rendered_snapshot_sequence = diagnostics_counter(
+            invalidation,
+            "last_rendered_snapshot_sequence");
+        terminal_output_observed = true;
+    }
+
+    void maybe_publish_first_text_frame()
+    {
+        if (surface == nullptr || terminal_first_text_frame_produced ||
+            !process_started_observed || !terminal_output_observed ||
+            !first_output_rendered_snapshot_sequence)
+        {
+            return;
+        }
+
+        QJsonObject atlas;
+        vnm_terminal::diagnostics::append_atlas_metrics_json(*surface, atlas);
+        QJsonObject invalidation;
+        vnm_terminal::diagnostics::append_render_invalidation_metrics_json(
+            *surface,
+            invalidation);
+        const std::optional<std::uint64_t> captured_snapshot_sequence =
+            diagnostics_counter(atlas, "captured_snapshot_sequence");
+        const std::optional<std::uint64_t> rendered_snapshot_sequence =
+            diagnostics_counter(invalidation, "last_rendered_snapshot_sequence");
+        const std::optional<std::uint64_t> rendered_publication_generation =
+            diagnostics_counter(
+                invalidation,
+                "last_rendered_publication_generation");
+        const QJsonValue drew = atlas.value(QStringLiteral("drew"));
+        const QJsonObject buffer_upload =
+            atlas.value(QStringLiteral("buffer_upload")).toObject();
+        const std::optional<std::uint64_t> glyph_draw_calls =
+            diagnostics_counter(buffer_upload, "glyph_draw_calls");
+        const std::optional<std::uint64_t> msdf_text_draw_calls =
+            diagnostics_counter(buffer_upload, "msdf_text_draw_calls");
+        const QJsonObject cursor =
+            atlas.value(QStringLiteral("captured_render_cursor")).toObject();
+        if (!captured_snapshot_sequence || !rendered_snapshot_sequence ||
+            !rendered_publication_generation ||
+            *rendered_snapshot_sequence <=
+                *first_output_rendered_snapshot_sequence ||
+            *captured_snapshot_sequence != *rendered_snapshot_sequence ||
+            *rendered_publication_generation == 0U || !drew.isBool() ||
+            !drew.toBool() || !glyph_draw_calls || !msdf_text_draw_calls ||
+            (*glyph_draw_calls == 0U && *msdf_text_draw_calls == 0U) ||
+            !cursor.value(QStringLiteral("valid")).isBool() ||
+            !cursor.value(QStringLiteral("row")).isDouble() ||
+            !cursor.value(QStringLiteral("column")).isDouble())
+        {
+            return;
+        }
+
+        terminal_first_text_frame_produced = true;
+        QObject::disconnect(first_text_frame_connection);
+        diagnostic_sink.terminal_first_text_frame_produced({
+            surface->rows(),
+            surface->columns(),
+            surface->backend_ready(),
+            surface->backend_geometry_in_sync(),
+            *rendered_snapshot_sequence,
+            *rendered_publication_generation,
+            true,
+            *glyph_draw_calls,
+            *msdf_text_draw_calls,
+            cursor.value(QStringLiteral("valid")).toBool(),
+            cursor.value(QStringLiteral("row")).toInt(),
+            cursor.value(QStringLiteral("column")).toInt(),
+        });
+    }
+
+    void bind_first_text_frame_window(QQuickWindow* window)
+    {
+        QObject::disconnect(first_text_frame_connection);
+        if (window == nullptr || surface == nullptr ||
+            terminal_first_text_frame_produced)
+        {
+            return;
+        }
+        first_text_frame_connection = QObject::connect(
+            window,
+            &QQuickWindow::afterFrameEnd,
+            surface.data(),
+            [this] { maybe_publish_first_text_frame(); },
+            Qt::QueuedConnection);
+    }
+
     void construct_private_root(QObject* loaded_root)
     {
         root_callback_observed = true;
@@ -441,6 +646,21 @@ struct Terminal_surface_runtime_adapter::Impl
         settings = terminal_settings(configuration.settings);
         surface = new VNM_TerminalSurface(root_item.data());
         ++surface_construction_count;
+        if (output_capture) {
+            const std::optional<QString> base_path =
+                strict_utf8(output_capture->base_path);
+            if (!base_path || base_path->isEmpty() ||
+                output_capture->maximum_bytes == 0U)
+            {
+                return;
+            }
+            surface->set_backend_output_capture_config(
+                vnm_terminal::Backend_output_capture_config{
+                    *base_path,
+                    output_capture->maximum_bytes,
+                });
+            output_capture_configured = true;
+        }
         vnm_terminal::terminal_app::apply_terminal_settings_snapshot(
             *settings,
             *surface);
@@ -448,6 +668,75 @@ struct Terminal_surface_runtime_adapter::Impl
             root_item.data());
         scrollbar->set_surface(surface.data());
         apply_layout();
+
+        QQmlEngine* const engine = qmlEngine(root_item.data());
+        QQuickWindow* const window = root_item->window();
+        if (engine == nullptr || window == nullptr) {
+            return;
+        }
+        search_bar = new vnm_terminal::terminal_app::Terminal_search_bar(
+            *engine,
+            *window,
+            *surface);
+        if (!search_bar->is_valid()) {
+            return;
+        }
+        search_bar->setParent(surface.data());
+        settings_controller =
+            new vnm_terminal::terminal_app::Terminal_settings_controller(
+                surface.data());
+        settings_window =
+            new vnm_terminal::terminal_app::Terminal_settings_window(
+                *engine,
+                *surface,
+                *settings_controller,
+                false,
+                surface.data());
+        if (!settings_window->is_valid()) {
+            return;
+        }
+        settings_window->set_transient_parent(window);
+        shortcut_filter =
+            new vnm_terminal::terminal_app::Terminal_shortcut_filter(
+                surface.data());
+        window->installEventFilter(shortcut_filter.data());
+        shortcut_filter->set_search_ui_root(search_bar->root_item());
+        QObject::connect(
+            shortcut_filter.data(),
+            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
+                search_requested,
+            search_bar.data(),
+            &vnm_terminal::terminal_app::Terminal_search_bar::show_search);
+        QObject::connect(
+            shortcut_filter.data(),
+            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
+                search_next_requested,
+            surface.data(),
+            [this] { static_cast<void>(surface->search_next()); });
+        QObject::connect(
+            shortcut_filter.data(),
+            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
+                search_previous_requested,
+            surface.data(),
+            [this] { static_cast<void>(surface->search_previous()); });
+        QObject::connect(
+            shortcut_filter.data(),
+            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
+                search_dismiss_requested,
+            search_bar.data(),
+            &vnm_terminal::terminal_app::Terminal_search_bar::dismiss_search);
+        QObject::connect(
+            shortcut_filter.data(),
+            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
+                settings_requested,
+            settings_window.data(),
+            &vnm_terminal::terminal_app::Terminal_settings_window::show_window);
+        QObject::connect(
+            search_bar.data(),
+            &vnm_terminal::terminal_app::Terminal_search_bar::visibility_changed,
+            shortcut_filter.data(),
+            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
+                set_search_ui_visible);
 
         QObject::connect(
             root_item,
@@ -514,6 +803,81 @@ struct Terminal_surface_runtime_adapter::Impl
             });
         QObject::connect(
             surface.data(),
+            &VNM_TerminalSurface::backend_error,
+            surface.data(),
+            [this](
+                VNM_TerminalSurface::Backend_error_code code,
+                const QString& message)
+            {
+                diagnostic_sink.terminal_backend_error({
+                    static_cast<int>(code),
+                    bounded_backend_diagnostic(message).toStdString(),
+                });
+            });
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::windowChanged,
+            surface.data(),
+            [this](QQuickWindow* changed_window) {
+                bind_first_text_frame_window(changed_window);
+            });
+        bind_first_text_frame_window(surface->window());
+        auto last_output_activity_ms = std::make_shared<qint64>(-1);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::output_activity,
+            surface.data(),
+            [this, last_output_activity_ms] {
+                observe_first_output();
+                const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+                if (*last_output_activity_ms >= 0 &&
+                    now_ms >= *last_output_activity_ms &&
+                    now_ms - *last_output_activity_ms <
+                        k_terminal_output_activity_throttle_ms)
+                {
+                    return;
+                }
+                *last_output_activity_ms = now_ms;
+                diagnostic_sink.terminal_output_activity();
+            });
+        const auto publish_settings = [this] { publish_complete_settings(); };
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::font_size_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::color_scheme_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::font_family_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::text_renderer_mode_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::lcd_subpixel_order_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::row_timestamp_tooltip_enabled_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
+            &VNM_TerminalSurface::scrollback_limit_changed,
+            surface.data(),
+            publish_settings);
+        QObject::connect(
+            surface.data(),
             &VNM_TerminalSurface::process_exited,
             surface.data(),
             [this](VNM_TerminalSurface::Exit_reason, int exit_code) {
@@ -528,6 +892,15 @@ struct Terminal_surface_runtime_adapter::Impl
 
     void destroy_private_objects()
     {
+        QObject::disconnect(first_text_frame_connection);
+        delete settings_window.data();
+        settings_window.clear();
+        delete settings_controller.data();
+        settings_controller.clear();
+        delete search_bar.data();
+        search_bar.clear();
+        delete shortcut_filter.data();
+        shortcut_filter.clear();
         delete scrollbar.data();
         scrollbar.clear();
         delete surface.data();
@@ -538,9 +911,12 @@ struct Terminal_surface_runtime_adapter::Impl
     }
 
     Terminal_worker_surface_configuration configuration;
+    std::optional<Terminal_worker_output_capture_configuration> output_capture;
     Terminal_worker_remote_sink& remote_sink;
     Terminal_worker_gui_dispatcher& gui_dispatcher;
     Terminal_worker_termination& termination;
+    Terminal_worker_complete_settings_sink& complete_settings_sink;
+    Terminal_worker_diagnostic_observation_sink& diagnostic_sink;
     Terminal_native_start_admission_hook admission_hook;
     Remote_sink_bridge sink_bridge;
     vnm::Remote_ui_surface_runtime remote_runtime;
@@ -549,12 +925,24 @@ struct Terminal_surface_runtime_adapter::Impl
         settings;
     QPointer<VNM_TerminalSurface> surface;
     QPointer<vnm_terminal::terminal_app::Terminal_scrollbar> scrollbar;
+    QPointer<vnm_terminal::terminal_app::Terminal_search_bar> search_bar;
+    QPointer<vnm_terminal::terminal_app::Terminal_settings_controller>
+        settings_controller;
+    QPointer<vnm_terminal::terminal_app::Terminal_settings_window>
+        settings_window;
+    QPointer<vnm_terminal::terminal_app::Terminal_shortcut_filter>
+        shortcut_filter;
+    QMetaObject::Connection first_text_frame_connection;
     std::optional<Terminal_worker_exit_observation> exit_observation;
+    std::optional<std::uint64_t> first_output_rendered_snapshot_sequence;
     std::size_t surface_construction_count = 0U;
     std::size_t structured_start_call_count = 0U;
     bool root_callback_observed = false;
     bool private_root_ready = false;
     bool process_started_observed = false;
+    bool terminal_output_observed = false;
+    bool terminal_first_text_frame_produced = false;
+    bool output_capture_configured = false;
     bool start_invoked = false;
     bool hosted_worker_terminated = false;
     bool initialized = false;
@@ -565,16 +953,22 @@ struct Terminal_surface_runtime_adapter::Impl
 
 Terminal_surface_runtime_adapter::Terminal_surface_runtime_adapter(
     Terminal_worker_surface_configuration configuration,
+    std::optional<Terminal_worker_output_capture_configuration> output_capture,
     Terminal_worker_remote_sink& remote_sink,
     Terminal_worker_gui_dispatcher& gui_dispatcher,
     Terminal_worker_termination& termination,
+    Terminal_worker_complete_settings_sink& complete_settings_sink,
+    Terminal_worker_diagnostic_observation_sink& diagnostic_sink,
     Terminal_native_start_admission_hook admission_hook)
 :
     m_impl(std::make_unique<Impl>(
         std::move(configuration),
+        std::move(output_capture),
         remote_sink,
         gui_dispatcher,
         termination,
+        complete_settings_sink,
+        diagnostic_sink,
         std::move(admission_hook)))
 {}
 
@@ -589,7 +983,9 @@ Terminal_surface_runtime_adapter::initialize()
     if (m_impl->initialized) {
         return Terminal_worker_initialization_result::ALREADY_INITIALIZED;
     }
-    if (!valid_configuration(m_impl->configuration)) {
+    if (!valid_configuration(m_impl->configuration) ||
+        !valid_output_capture(m_impl->output_capture))
+    {
         return Terminal_worker_initialization_result::INVALID_CONFIGURATION;
     }
 
@@ -619,6 +1015,17 @@ Terminal_surface_runtime_adapter::initialize()
         [this](QObject* root) {
             m_impl->construct_private_root(root);
         };
+    remote_configuration.after_event_batch =
+        [this](QObject*) {
+            if (m_impl->surface == nullptr ||
+                (m_impl->search_bar != nullptr &&
+                 m_impl->search_bar->is_visible()))
+            {
+                return m_impl->surface != nullptr;
+            }
+            m_impl->surface->forceActiveFocus(Qt::OtherFocusReason);
+            return true;
+        };
 
     if (!m_impl->remote_runtime.initialize(
             remote_configuration,
@@ -633,6 +1040,9 @@ Terminal_surface_runtime_adapter::initialize()
     }
     if (!m_impl->private_root_ready || m_impl->surface == nullptr ||
         m_impl->scrollbar == nullptr ||
+        m_impl->search_bar == nullptr ||
+        m_impl->settings_window == nullptr ||
+        m_impl->shortcut_filter == nullptr ||
         m_impl->surface_construction_count != 1U)
     {
         shutdown();
@@ -669,6 +1079,27 @@ bool Terminal_surface_runtime_adapter::request_present()
     }
     m_impl->remote_runtime.request_present();
     return true;
+}
+
+Terminal_worker_message_submission_result
+Terminal_surface_runtime_adapter::submit_message(
+    std::span<const std::uint8_t> message_utf8)
+{
+    if (!m_impl->initialized || m_impl->surface == nullptr) {
+        return {
+            Terminal_worker_message_submission_outcome::NOT_RUNNING,
+            {},
+        };
+    }
+    const QByteArray message(
+        reinterpret_cast<const char*>(message_utf8.data()),
+        static_cast<qsizetype>(message_utf8.size()));
+    const vnm_terminal::Terminal_message_submission_result result =
+        m_impl->surface->submit_utf8_message(message);
+    return {
+        workspace_message_outcome(result.outcome),
+        result.error.toStdString(),
+    };
 }
 
 void Terminal_surface_runtime_adapter::shutdown()
@@ -850,6 +1281,37 @@ bool Terminal_surface_runtime_adapter::test_inject_timestamp_request()
         !m_impl->root_item->property("timestampText").toString().isEmpty();
 }
 
+bool Terminal_surface_runtime_adapter::test_inject_output_activity()
+{
+    if (m_impl->surface == nullptr) {
+        return false;
+    }
+    emit m_impl->surface->output_activity();
+    return true;
+}
+
+bool Terminal_surface_runtime_adapter::test_inject_backend_error()
+{
+    if (m_impl->surface == nullptr) {
+        return false;
+    }
+    emit m_impl->surface->backend_error(
+        static_cast<VNM_TerminalSurface::Backend_error_code>(0),
+        QStringLiteral("synthetic\nbackend diagnostic"));
+    return true;
+}
+
+bool Terminal_surface_runtime_adapter::test_set_font_size(double font_size)
+{
+    if (m_impl->surface == nullptr || !std::isfinite(font_size) ||
+        font_size <= 0.0)
+    {
+        return false;
+    }
+    m_impl->surface->set_font_size(font_size);
+    return true;
+}
+
 Terminal_surface_runtime_adapter::Test_observation
 Terminal_surface_runtime_adapter::test_observation() const
 {
@@ -858,6 +1320,10 @@ Terminal_surface_runtime_adapter::test_observation() const
         m_impl->structured_start_call_count,
         m_impl->surface != nullptr,
         m_impl->scrollbar != nullptr,
+        m_impl->search_bar != nullptr,
+        m_impl->settings_window != nullptr,
+        m_impl->shortcut_filter != nullptr,
+        m_impl->output_capture_configured,
         m_impl->remote_runtime.is_initialized(),
         m_impl->root_item != nullptr &&
             m_impl->root_item->property("timestampVisible").toBool(),
@@ -881,16 +1347,23 @@ struct Terminal_worker_runtime::Impl
 {
     Impl(
         Terminal_worker_surface_configuration configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture,
         Terminal_worker_remote_sink& remote_sink,
         Terminal_worker_gui_dispatcher& gui_dispatcher,
         Terminal_child_fact_transport& fact_transport,
-        Terminal_worker_termination& termination)
+        Terminal_worker_termination& termination,
+        Terminal_worker_complete_settings_sink& complete_settings_sink,
+        Terminal_worker_diagnostic_observation_sink& diagnostic_sink)
     :
         adapter(
             std::move(configuration),
+            std::move(output_capture),
             remote_sink,
             gui_dispatcher,
-            termination),
+            termination,
+            complete_settings_sink,
+            diagnostic_sink),
         coordinator(adapter, fact_transport)
     {}
 
@@ -901,17 +1374,23 @@ struct Terminal_worker_runtime::Impl
 
 Terminal_worker_runtime::Terminal_worker_runtime(
     Terminal_worker_surface_configuration configuration,
+    std::optional<Terminal_worker_output_capture_configuration> output_capture,
     Terminal_worker_remote_sink& remote_sink,
     Terminal_worker_gui_dispatcher& gui_dispatcher,
     Terminal_child_fact_transport& fact_transport,
-    Terminal_worker_termination& termination)
+    Terminal_worker_termination& termination,
+    Terminal_worker_complete_settings_sink& complete_settings_sink,
+    Terminal_worker_diagnostic_observation_sink& diagnostic_sink)
 :
     m_impl(std::make_unique<Impl>(
         std::move(configuration),
+        std::move(output_capture),
         remote_sink,
         gui_dispatcher,
         fact_transport,
-        termination))
+        termination,
+        complete_settings_sink,
+        diagnostic_sink))
 {}
 
 Terminal_worker_runtime::~Terminal_worker_runtime()
@@ -935,7 +1414,6 @@ Terminal_worker_run_result Terminal_worker_runtime::run(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
     std::uint64_t hosted_generation,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment)
 {
@@ -946,8 +1424,13 @@ Terminal_worker_run_result Terminal_worker_runtime::run(
         serialized_request,
         platform,
         hosted_generation,
-        additional_reserved_names,
         std::move(authorized_environment));
+}
+
+Terminal_worker_message_submission_result Terminal_worker_runtime::submit_message(
+    std::span<const std::uint8_t> message_utf8)
+{
+    return m_impl->adapter.submit_message(message_utf8);
 }
 
 bool Terminal_worker_runtime::forward_input(
@@ -991,5 +1474,22 @@ bool Terminal_worker_runtime::replay_unacknowledged()
 {
     return m_impl->coordinator.replay_unacknowledged();
 }
+
+void Terminal_worker_noop_complete_settings_sink::accept_complete_settings(
+    const Terminal_worker_settings&)
+{}
+
+void Terminal_worker_noop_diagnostic_observation_sink::
+terminal_output_activity()
+{}
+
+void Terminal_worker_noop_diagnostic_observation_sink::
+terminal_first_text_frame_produced(
+    const Terminal_worker_first_text_frame_observation&)
+{}
+
+void Terminal_worker_noop_diagnostic_observation_sink::terminal_backend_error(
+    const Terminal_worker_backend_error_observation&)
+{}
 
 } // namespace vnm::terminal_workspace

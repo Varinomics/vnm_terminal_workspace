@@ -1,11 +1,11 @@
 #include "vnm_terminal_workspace/terminal_worker_runtime.h"
+#include "vnm_terminal_workspace/terminal_worker_envelope.h"
 
 #include "vnm_ls_remote_ui_adapter.h"
 #include "vnm_plugin_contract.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
@@ -409,58 +409,50 @@ struct Worker_state
     vnm_host_callbacks_t callbacks{};
     QByteArray request;
     workspace::Launch_platform platform = workspace::Launch_platform::WINDOWS;
-    std::vector<std::string> reserved_names;
-    std::vector<std::string_view> reserved_name_views;
+    workspace::Terminal_worker_surface_configuration surface_configuration;
+    std::optional<workspace::Terminal_worker_output_capture_configuration>
+        output_capture;
     std::optional<std::vector<vnm::environment_policy::Environment_entry>>
         authorized_environment;
     std::unique_ptr<Worker_fact_transport> fact_transport;
     Worker_remote_sink remote_sink;
     Worker_gui_dispatcher gui_dispatcher;
     Worker_termination termination;
+    workspace::Terminal_worker_noop_complete_settings_sink settings_sink;
+    workspace::Terminal_worker_noop_diagnostic_observation_sink diagnostic_sink;
     std::unique_ptr<workspace::Terminal_worker_runtime> runtime;
     bool run_scheduled = false;
 };
 
-std::optional<std::vector<vnm::environment_policy::Environment_entry>>
-authorized_environment(const QJsonObject& payload, bool* out_ok)
+void clear_string(std::string& value)
 {
-    *out_ok = false;
-    if (!payload.value(QStringLiteral("authorized_environment_present")).isBool() ||
-        !payload.value(QStringLiteral("authorized_environment")).isArray())
-    {
-        return std::nullopt;
+    volatile char* bytes = value.data();
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        bytes[index] = '\0';
     }
-    const bool present = payload.value(
-        QStringLiteral("authorized_environment_present")).toBool();
-    const QJsonArray entries = payload.value(
-        QStringLiteral("authorized_environment")).toArray();
-    if (!present && !entries.isEmpty()) {
-        return std::nullopt;
+    value.clear();
+}
+
+void clear_bytes(std::vector<std::uint8_t>& value)
+{
+    volatile std::uint8_t* bytes = value.data();
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        bytes[index] = 0U;
     }
-    if (!present) {
-        *out_ok = true;
-        return std::nullopt;
+    value.clear();
+}
+
+void clear_environment(
+    std::optional<std::vector<vnm::environment_policy::Environment_entry>>&
+        environment)
+{
+    if (!environment) {
+        return;
     }
-    std::vector<vnm::environment_policy::Environment_entry> result;
-    result.reserve(static_cast<std::size_t>(entries.size()));
-    for (const QJsonValue& value : entries) {
-        if (!value.isObject()) {
-            return std::nullopt;
-        }
-        const QJsonObject entry = value.toObject();
-        if (entry.size() != 2 ||
-            !entry.value(QStringLiteral("name")).isString() ||
-            !entry.value(QStringLiteral("value")).isString())
-        {
-            return std::nullopt;
-        }
-        result.push_back({
-            entry.value(QStringLiteral("name")).toString().toStdString(),
-            entry.value(QStringLiteral("value")).toString().toStdString(),
-        });
+    for (vnm::environment_policy::Environment_entry& entry : *environment) {
+        clear_string(entry.value);
     }
-    *out_ok = true;
-    return result;
+    environment.reset();
 }
 
 bool initialize_state(
@@ -475,64 +467,35 @@ bool initialize_state(
     {
         return false;
     }
-    QJsonParseError error{};
-    const QJsonDocument document = QJsonDocument::fromJson(
-        QByteArray(context->params_json),
-        &error);
-    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+    workspace::Terminal_worker_envelope_result decoded =
+        workspace::decode_terminal_worker_envelope(context->params_json);
+    if (!decoded.envelope) {
         return false;
     }
-    const QJsonObject payload = document.object();
-    const QJsonValue schema = payload.value(QStringLiteral("schema_version"));
-    const QJsonValue provider_namespace = payload.value(
-        QStringLiteral("provider_namespace"));
-    const QJsonValue request = payload.value(QStringLiteral("request_base64"));
-    const QJsonValue platform = payload.value(QStringLiteral("platform"));
-    const QJsonValue reserved = payload.value(
-        QStringLiteral("additional_reserved_names"));
-    if (!schema.isDouble() || schema.toInt() != 1 ||
-        !provider_namespace.isString() || provider_namespace.toString().isEmpty() ||
-        !request.isString() || !platform.isString() || !reserved.isArray())
+    workspace::Terminal_worker_envelope& envelope = *decoded.envelope;
+    // The neutral package policy has no product environment names. A product
+    // wrapper must validate its own fixed compile-time allowlist before it
+    // constructs the shared runtime.
+    if (envelope.authorized_environment &&
+        !envelope.authorized_environment->empty())
     {
+        clear_bytes(envelope.serialized_request);
+        clear_environment(envelope.authorized_environment);
         return false;
     }
-    const QByteArray encoded = request.toString().toLatin1();
-    state.request = QByteArray::fromBase64(
-        encoded,
-        QByteArray::AbortOnBase64DecodingErrors);
-    if (state.request.isEmpty()) {
-        return false;
-    }
-    if (platform.toString() == QStringLiteral("windows")) {
-        state.platform = workspace::Launch_platform::WINDOWS;
-    }
-    else if (platform.toString() == QStringLiteral("posix")) {
-        state.platform = workspace::Launch_platform::POSIX;
-    }
-    else {
-        return false;
-    }
-    for (const QJsonValue& value : reserved.toArray()) {
-        if (!value.isString()) {
-            return false;
-        }
-        state.reserved_names.push_back(value.toString().toStdString());
-    }
-    state.reserved_name_views.reserve(state.reserved_names.size());
-    for (const std::string& name : state.reserved_names) {
-        state.reserved_name_views.push_back(name);
-    }
-    bool environment_ok = false;
-    state.authorized_environment = authorized_environment(
-        payload,
-        &environment_ok);
-    if (!environment_ok) {
-        return false;
-    }
+    state.request = QByteArray(
+        reinterpret_cast<const char*>(envelope.serialized_request.data()),
+        static_cast<qsizetype>(envelope.serialized_request.size()));
+    clear_bytes(envelope.serialized_request);
+    state.platform = envelope.platform;
+    state.surface_configuration = std::move(envelope.surface_configuration);
+    state.output_capture = std::move(envelope.output_capture);
+    state.authorized_environment =
+        std::move(envelope.authorized_environment);
     state.callbacks = *context->host_callbacks;
     state.fact_transport = std::make_unique<Worker_fact_transport>(
         state.callbacks,
-        provider_namespace.toString().toStdString());
+        std::move(envelope.provider_namespace));
     return true;
 }
 
@@ -633,6 +596,9 @@ VNM_API void VNM_CALL vnm_destroy(void* instance)
         state->runtime->shutdown();
         state->runtime.reset();
     }
+    state->request.fill('\0');
+    state->request.clear();
+    clear_environment(state->authorized_environment);
     state->remote_sink.clear();
     delete state;
 }
@@ -652,14 +618,15 @@ LS_API void LS_CALL ls_remote_ui_init(
         state->termination.terminate_hosted_worker();
         return;
     }
-    workspace::Terminal_worker_surface_configuration configuration;
-    configuration.title = "Terminal";
     state->runtime = std::make_unique<workspace::Terminal_worker_runtime>(
-        std::move(configuration),
+        std::move(state->surface_configuration),
+        std::move(state->output_capture),
         state->remote_sink,
         state->gui_dispatcher,
         *state->fact_transport,
-        state->termination);
+        state->termination,
+        state->settings_sink,
+        state->diagnostic_sink);
     if (state->runtime->initialize() !=
         workspace::Terminal_worker_initialization_result::READY)
     {
@@ -680,8 +647,9 @@ LS_API void LS_CALL ls_remote_ui_init(
                     static_cast<std::size_t>(state->request.size())),
                 state->platform,
                 generation,
-                state->reserved_name_views,
-                state->authorized_environment));
+                std::move(state->authorized_environment)));
+            state->request.fill('\0');
+            state->request.clear();
         },
         Qt::QueuedConnection);
 }

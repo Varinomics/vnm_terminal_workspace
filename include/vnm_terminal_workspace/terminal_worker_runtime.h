@@ -3,6 +3,7 @@
 #include "vnm_terminal_workspace/terminal_launch_request.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -197,6 +198,10 @@ struct Terminal_worker_settings
         Terminal_worker_lcd_subpixel_order::AUTO;
     bool row_timestamp_tooltip_enabled = true;
     std::optional<int> scrollback_limit;
+
+    friend bool operator==(
+        const Terminal_worker_settings&,
+        const Terminal_worker_settings&) = default;
 };
 
 struct Terminal_worker_surface_configuration
@@ -210,6 +215,121 @@ struct Terminal_worker_surface_configuration
     std::string title;
     Terminal_worker_style style = Terminal_worker_style::DARK;
     double scrollbar_width = 12.0;
+
+    friend bool operator==(
+        const Terminal_worker_surface_configuration&,
+        const Terminal_worker_surface_configuration&) = default;
+};
+
+struct Terminal_worker_output_capture_configuration
+{
+    std::string base_path;
+    std::size_t maximum_bytes = 0U;
+
+    friend bool operator==(
+        const Terminal_worker_output_capture_configuration&,
+        const Terminal_worker_output_capture_configuration&) = default;
+};
+
+class Terminal_worker_complete_settings_sink
+{
+public:
+    virtual ~Terminal_worker_complete_settings_sink() = default;
+
+    virtual void accept_complete_settings(
+        const Terminal_worker_settings& settings) = 0;
+};
+
+class Terminal_worker_noop_complete_settings_sink final :
+    public Terminal_worker_complete_settings_sink
+{
+public:
+    void accept_complete_settings(
+        const Terminal_worker_settings&) override;
+};
+
+struct Terminal_worker_first_text_frame_observation
+{
+    int rows = 0;
+    int columns = 0;
+    bool backend_ready = false;
+    bool backend_geometry_in_sync = false;
+    std::uint64_t rendered_snapshot_sequence = 0U;
+    std::uint64_t rendered_publication_generation = 0U;
+    bool drew = false;
+    std::uint64_t glyph_draw_calls = 0U;
+    std::uint64_t msdf_text_draw_calls = 0U;
+    bool cursor_valid = false;
+    int cursor_row = 0;
+    int cursor_column = 0;
+
+    friend bool operator==(
+        const Terminal_worker_first_text_frame_observation&,
+        const Terminal_worker_first_text_frame_observation&) = default;
+};
+
+struct Terminal_worker_backend_error_observation
+{
+    int code = 0;
+    std::string message;
+
+    friend bool operator==(
+        const Terminal_worker_backend_error_observation&,
+        const Terminal_worker_backend_error_observation&) = default;
+};
+
+class Terminal_worker_diagnostic_observation_sink
+{
+public:
+    virtual ~Terminal_worker_diagnostic_observation_sink() = default;
+
+    virtual void terminal_output_activity() = 0;
+    virtual void terminal_first_text_frame_produced(
+        const Terminal_worker_first_text_frame_observation& observation) = 0;
+    virtual void terminal_backend_error(
+        const Terminal_worker_backend_error_observation& observation) = 0;
+};
+
+class Terminal_worker_noop_diagnostic_observation_sink final :
+    public Terminal_worker_diagnostic_observation_sink
+{
+public:
+    void terminal_output_activity() override;
+    void terminal_first_text_frame_produced(
+        const Terminal_worker_first_text_frame_observation&) override;
+    void terminal_backend_error(
+        const Terminal_worker_backend_error_observation&) override;
+};
+
+enum class Terminal_worker_message_submission_outcome
+{
+    ACCEPTED,
+    INVALID_UTF8,
+    INVALID_MESSAGE,
+    EMPTY_MESSAGE,
+    MESSAGE_TOO_LARGE,
+    NOT_RUNNING,
+    CLOSING,
+    CAPABILITY_MISSING,
+    STALE_GENERATION,
+    BACKPRESSURE,
+    QUEUE_LIMIT,
+    BACKEND_REJECTED,
+    WORKER_REJECTED,
+    DEADLINE_EXPIRED,
+    INDETERMINATE,
+};
+
+struct Terminal_worker_message_submission_result
+{
+    Terminal_worker_message_submission_outcome outcome =
+        Terminal_worker_message_submission_outcome::BACKEND_REJECTED;
+    std::string error;
+
+    [[nodiscard]] bool accepted() const noexcept
+    {
+        return outcome == Terminal_worker_message_submission_outcome::ACCEPTED;
+    }
 };
 
 struct Terminal_remote_input_message
@@ -263,10 +383,14 @@ class Terminal_worker_runtime
 public:
     Terminal_worker_runtime(
         Terminal_worker_surface_configuration configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture,
         Terminal_worker_remote_sink& remote_sink,
         Terminal_worker_gui_dispatcher& gui_dispatcher,
         Terminal_child_fact_transport& fact_transport,
-        Terminal_worker_termination& termination);
+        Terminal_worker_termination& termination,
+        Terminal_worker_complete_settings_sink& complete_settings_sink,
+        Terminal_worker_diagnostic_observation_sink& diagnostic_sink);
     ~Terminal_worker_runtime();
 
     Terminal_worker_runtime(const Terminal_worker_runtime&) = delete;
@@ -277,10 +401,11 @@ public:
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
         std::uint64_t hosted_generation,
-        std::span<const std::string_view> additional_reserved_names = {},
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment = std::nullopt);
 
+    Terminal_worker_message_submission_result submit_message(
+        std::span<const std::uint8_t> message_utf8);
     bool forward_input(const Terminal_remote_input_message& message);
     bool forward_state(const Terminal_remote_state_message& message);
     bool request_present();

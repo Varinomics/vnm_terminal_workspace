@@ -179,7 +179,6 @@ bool successful_run_projects_once_and_publishes_monotonic_facts()
         payload(),
         workspace::Launch_platform::POSIX,
         41U,
-        {},
         authorized);
 
     bool ok = true;
@@ -269,33 +268,6 @@ bool cancellation_and_invalid_envelopes_never_construct_surface()
             "an undecodable envelope must terminate without inventing a session fact");
     }
     return ok;
-}
-
-bool worker_revalidates_product_reserved_base_names()
-{
-    workspace::Terminal_launch_request value = request();
-    value.base_environment.push_back({"PRODUCT_RESERVED", "must-not-pass"});
-    const workspace::Launch_request_result prepared =
-        workspace::prepare_terminal_launch_request(
-            std::move(value),
-            workspace::Launch_platform::POSIX);
-    Fake_adapter adapter;
-    Scripted_transport transport;
-    runtime_detail::Terminal_worker_coordinator runtime(adapter, transport);
-    const std::string_view additional_reserved[] = {"PRODUCT_RESERVED"};
-
-    const auto result = runtime.run(
-        prepared.serialized_request,
-        workspace::Launch_platform::POSIX,
-        55U,
-        additional_reserved);
-
-    return check(
-        prepared.status == workspace::Launch_request_status::ACCEPTED &&
-            result == workspace::Terminal_worker_run_result::TERMINATED &&
-            adapter.remote_runtime_calls == 0 && adapter.start_calls == 0 &&
-            adapter.termination_calls == 1 && transport.delivered.empty(),
-        "the worker must revalidate the decoded base with product reservations");
 }
 
 bool every_construction_failure_totalizes()
@@ -521,7 +493,6 @@ int main()
     ok &= successful_run_projects_once_and_publishes_monotonic_facts();
     ok &= reply_loss_replays_same_fact_without_native_retry();
     ok &= cancellation_and_invalid_envelopes_never_construct_surface();
-    ok &= worker_revalidates_product_reserved_base_names();
     ok &= every_construction_failure_totalizes();
     ok &= structured_failure_and_indeterminacy_never_retry();
     ok &= running_failure_totalizes_without_exit_wait();

@@ -1,4 +1,6 @@
 #include "vnm_terminal_workspace/terminal_launch_request.h"
+#include "vnm_terminal_workspace/terminal_worker_envelope.h"
+#include "vnm_terminal_workspace/terminal_worker_composition.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +14,60 @@ namespace workspace = vnm::terminal_workspace;
 namespace environment = vnm::environment_policy;
 
 namespace {
+
+struct Closed_product_configuration
+{
+    std::string control_token;
+};
+
+struct Closed_product_policy
+{
+    using Configuration = Closed_product_configuration;
+    inline static constexpr std::string_view package_id = "test.worker";
+    inline static constexpr std::string_view family_id = "test";
+    inline static constexpr std::string_view configuration_schema =
+        "Closed_product_configuration@1";
+    inline static constexpr std::array capabilities{
+        workspace::Terminal_worker_package_capability::REMOTE_UI,
+        workspace::Terminal_worker_package_capability::WHOLE_MESSAGE_INPUT,
+    };
+    inline static constexpr std::array<std::string_view, 1>
+        product_environment_names{"TEST_CONTROL_TOKEN"};
+    inline static bool observed_clear = false;
+
+    static std::optional<std::string> encode_configuration(
+        const Configuration& value) noexcept
+    {
+        return value.control_token == "secret"
+            ? std::optional<std::string>(
+                "{\"control_token\":\"secret\"}")
+            : std::nullopt;
+    }
+
+    static std::optional<Configuration> decode_configuration(
+        std::string_view value) noexcept
+    {
+        return value == "{\"control_token\":\"secret\"}"
+            ? std::optional<Configuration>(Configuration{"secret"})
+            : std::nullopt;
+    }
+
+    static void clear_configuration(Configuration& value) noexcept
+    {
+        std::fill(value.control_token.begin(), value.control_token.end(), '\0');
+        observed_clear = std::all_of(
+            value.control_token.begin(),
+            value.control_token.end(),
+            [](char byte) { return byte == '\0'; });
+        value.control_token.clear();
+    }
+};
+
+struct Invalid_fixed_policy : Closed_product_policy
+{
+    inline static constexpr std::array<std::string_view, 1>
+        product_environment_names{"VNM_CONTROL_TOKEN"};
+};
 
 bool check(bool condition, std::string_view message)
 {
@@ -244,48 +300,9 @@ bool base_environment_is_defensively_sanitized()
     }
 
     workspace::Terminal_launch_request request = windows_request();
-    request.base_environment.push_back({
-        "PRODUCT_PRIVATE_TOKEN",
-        "secret",
-    });
-    constexpr std::array<std::string_view, 3> k_product_reserved{
-        "PRODUCT_PRIVATE_ENDPOINT",
-        "PRODUCT_PRIVATE_TOKEN",
-        "PRODUCT_INTERNAL",
-    };
-    const std::array<environment::Environment_entry, 2> unsanitized_base{{
-        {"PRODUCT_PRIVATE_TOKEN", "secret"},
-        {"PRODUCT_VISIBLE", "ordinary"},
-    }};
-    const environment::Environment_sanitization_result sanitized =
-        environment::sanitize_explicit_base_environment(
-            unsanitized_base,
-            environment::Environment_platform::WINDOWS,
-            k_product_reserved);
-    ok &= check(
-        sanitized.accepted &&
-            sanitized.entries ==
-                std::vector<environment::Environment_entry>(
-                    {{"PRODUCT_VISIBLE", "ordinary"}}) &&
-            sanitized.issues.size() == 1U &&
-            sanitized.issues.front().reserved_class ==
-                environment::Reserved_environment_class::
-                    PRODUCT_RESERVED_INPUT,
-        "product-owned name must be stripped from the explicit base");
-
+    request.base_environment.push_back({"PATH", "second"});
     workspace::Launch_request_result result =
         workspace::prepare_terminal_launch_request(
-            request,
-            workspace::Launch_platform::WINDOWS,
-            k_product_reserved);
-    ok &= check(
-        result.error ==
-            workspace::Launch_request_error::BASE_ENVIRONMENT_RESERVED_NAME,
-        "product-owned name must remain reserved from the explicit base");
-
-    request = windows_request();
-    request.base_environment.push_back({"PATH", "second"});
-    result = workspace::prepare_terminal_launch_request(
         request,
         workspace::Launch_platform::WINDOWS);
     ok &= check(
@@ -459,6 +476,196 @@ bool codec_golden_payloads_are_stable()
     return ok;
 }
 
+bool worker_envelope_is_strict_and_canonical()
+{
+    constexpr std::string_view k_absent_golden =
+        "{\"vnm_terminal_workspace_envelope@1\":\""
+        "Vk5NVFdFMDEBAAAAAQEAAABwAgAAAAECIAMAAFgCAAAAIAAAACAAAAAAgD8HAAAA"
+        "Q2xhc3NpYwAAAAAAAAAAAAAqQAAAAQAAAAAAAAAAAAEAAAAAAAAoQAAAAAAAAA==\"}";
+    constexpr std::string_view k_present_golden =
+        "{\"vnm_terminal_workspace_envelope@1\":\""
+        "Vk5NVFdFMDEBAAAAAQEAAABwAgAAAAECIAMAAFgCAAAAIAAAACAAAAAAgD8HAAAA"
+        "Q2xhc3NpYwAAAAAAAAAAAAAqQAAAAQAAAAAAAAAAAAEAAAAAAAAoQAABAQAAAAEAAA"
+        "BBAQAAAEI=\"}";
+
+    workspace::Terminal_worker_envelope absent;
+    absent.provider_namespace = "p";
+    absent.serialized_request = {1U, 2U};
+    absent.platform = workspace::Launch_platform::POSIX;
+    const workspace::Terminal_worker_envelope_result encoded_absent =
+        workspace::encode_terminal_worker_envelope(absent);
+    const workspace::Terminal_worker_envelope_result decoded_absent =
+        workspace::decode_terminal_worker_envelope(k_absent_golden);
+
+    workspace::Terminal_worker_envelope present = absent;
+    present.authorized_environment =
+        std::vector<environment::Environment_entry>{{"A", "B"}};
+    const workspace::Terminal_worker_envelope_result encoded_present =
+        workspace::encode_terminal_worker_envelope(present);
+    const workspace::Terminal_worker_envelope_result decoded_present =
+        workspace::decode_terminal_worker_envelope(k_present_golden);
+
+    bool ok = true;
+    ok &= check(
+        encoded_absent.error ==
+                workspace::Terminal_worker_envelope_error::NONE &&
+            encoded_absent.serialized_envelope == k_absent_golden &&
+            decoded_absent.envelope == absent,
+        "the absent-environment envelope must match the independent golden");
+    ok &= check(
+        encoded_present.error ==
+                workspace::Terminal_worker_envelope_error::NONE &&
+            encoded_present.serialized_envelope == k_present_golden &&
+            decoded_present.envelope == present,
+        "the present-environment envelope must match the independent golden");
+
+    constexpr std::array<std::string_view, 5> k_rejected_json{
+        "{}",
+        "{\"unknown\":\"Vk5N\"}",
+        "{\"vnm_terminal_workspace_envelope@1\":\"Vk5N\","
+            "\"vnm_terminal_workspace_envelope@1\":\"Vk5N\"}",
+        " {\"vnm_terminal_workspace_envelope@1\":\"Vk5N\"}",
+        "{\"vnm_terminal_workspace_envelope@1\":\"Vk5N\"} ",
+    };
+    for (const std::string_view rejected : k_rejected_json) {
+        const workspace::Terminal_worker_envelope_result decoded =
+            workspace::decode_terminal_worker_envelope(rejected);
+        ok &= check(
+            !decoded.envelope &&
+                decoded.error ==
+                    workspace::Terminal_worker_envelope_error::
+                        MALFORMED_PAYLOAD,
+            "unknown, duplicate, missing, or noncanonical envelope fields must reject");
+    }
+    return ok;
+}
+
+bool invalid_platform_values_are_rejected_before_encoding()
+{
+    constexpr workspace::Launch_platform invalid =
+        static_cast<workspace::Launch_platform>(91);
+    workspace::Terminal_launch_request request;
+    request.launch_request_id = "invalid-platform-request";
+    request.session_id = "invalid-platform-session";
+    request.argv = {"tool"};
+    request.working_directory = "/";
+    request.base_environment_complete = true;
+    request.cancellation.identity = "invalid-platform-cancellation";
+
+    workspace::Terminal_worker_envelope envelope;
+    envelope.provider_namespace = "invalid-platform";
+    envelope.serialized_request = {1U};
+    envelope.platform = invalid;
+    return check(
+        workspace::prepare_terminal_launch_request(request, invalid).error ==
+                workspace::Launch_request_error::MALFORMED_PAYLOAD &&
+            workspace::decode_terminal_launch_request(
+                std::span<const std::uint8_t>{}, invalid).error ==
+                workspace::Launch_request_error::MALFORMED_PAYLOAD &&
+            workspace::encode_terminal_worker_envelope(envelope).error ==
+                workspace::Terminal_worker_envelope_error::MALFORMED_PAYLOAD,
+        "invalid platform values must reject before serialization or decoding");
+}
+
+bool fixed_product_composition_is_typed_and_strict()
+{
+    const workspace::Launch_request_result prepared =
+        workspace::prepare_terminal_launch_request(
+            windows_request(),
+            workspace::Launch_platform::WINDOWS);
+    workspace::Terminal_worker_envelope envelope;
+    envelope.provider_namespace = "test.provider";
+    envelope.serialized_request = prepared.serialized_request;
+    envelope.platform = workspace::Launch_platform::WINDOWS;
+    const auto encoded =
+        workspace::encode_terminal_worker_fixed_parameters<
+            Closed_product_policy>(
+                envelope,
+                Closed_product_configuration{"secret"});
+    auto decoded = workspace::decode_terminal_worker_fixed_parameters<
+        Closed_product_policy>(encoded.serialized_parameters);
+    bool ok = true;
+    ok &= check(
+        encoded.error ==
+                workspace::Terminal_worker_fixed_parameters_error::NONE &&
+            encoded.serialized_parameters.find(
+                "\"Closed_product_configuration@1\":"
+                "{\"control_token\":\"secret\"}") != std::string::npos &&
+            decoded.error ==
+                workspace::Terminal_worker_fixed_parameters_error::NONE &&
+            decoded.parameters &&
+            decoded.parameters->configuration.control_token == "secret",
+        "fixed package composition must carry only its closed typed record");
+    if (decoded.parameters) {
+        Closed_product_policy::clear_configuration(
+            decoded.parameters->configuration);
+    }
+    ok &= check(
+        Closed_product_policy::observed_clear,
+        "typed product configuration must expose causal owned-secret cleanup");
+    const auto invalid_policy =
+        workspace::encode_terminal_worker_fixed_parameters<
+            Invalid_fixed_policy>(
+                envelope,
+                Closed_product_configuration{"secret"});
+    ok &= check(
+        invalid_policy.error ==
+            workspace::Terminal_worker_fixed_parameters_error::INVALID_POLICY,
+        "fixed product environment names must not overlap framework reservations");
+
+    workspace::Terminal_launch_request base_injection = windows_request();
+    base_injection.base_environment.push_back(
+        {"TEST_CONTROL_TOKEN", "base-secret"});
+    const workspace::Launch_request_result unrestricted =
+        workspace::prepare_terminal_launch_request(
+            base_injection,
+            workspace::Launch_platform::WINDOWS);
+    workspace::Terminal_worker_envelope injected_envelope;
+    injected_envelope.provider_namespace = "test.provider";
+    injected_envelope.serialized_request = unrestricted.serialized_request;
+    injected_envelope.platform = workspace::Launch_platform::WINDOWS;
+    const auto fixed_injection =
+        workspace::encode_terminal_worker_fixed_parameters<
+            Closed_product_policy>(
+                injected_envelope,
+                Closed_product_configuration{"secret"});
+    const workspace::Terminal_worker_envelope_result common_injection =
+        workspace::encode_terminal_worker_envelope(injected_envelope);
+    std::string injected_parameters = common_injection.serialized_envelope;
+    injected_parameters.pop_back();
+    injected_parameters.append(
+        ",\"Closed_product_configuration@1\":"
+        "{\"control_token\":\"secret\"}}");
+    const auto decoded_injection =
+        workspace::decode_terminal_worker_fixed_parameters<
+            Closed_product_policy>(injected_parameters);
+    ok &= check(
+        unrestricted.status == workspace::Launch_request_status::ACCEPTED &&
+            !injected_envelope.authorized_environment &&
+            fixed_injection.error ==
+                workspace::Terminal_worker_fixed_parameters_error::
+                    INVALID_COMMON_ENVELOPE &&
+            decoded_injection.error ==
+                workspace::Terminal_worker_fixed_parameters_error::
+                    INVALID_COMMON_ENVELOPE &&
+            !decoded_injection.parameters,
+        "fixed product names must remain reserved in base input when the "
+        "optional product contribution is absent");
+
+    std::string malformed = encoded.serialized_parameters;
+    malformed.insert(malformed.size() - 1U, ",\"unknown\":true");
+    const auto rejected =
+        workspace::decode_terminal_worker_fixed_parameters<
+            Closed_product_policy>(malformed);
+    ok &= check(
+        rejected.error ==
+                workspace::Terminal_worker_fixed_parameters_error::
+                    INVALID_PRODUCT_CONFIGURATION &&
+            !rejected.parameters,
+        "fixed parameters must reject unknown product-level fields");
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -471,5 +678,8 @@ int main()
     ok &= cancellation_is_preserved_at_pure_handoffs();
     ok &= request_malformed_quota_and_owned_lifetime();
     ok &= codec_golden_payloads_are_stable();
+    ok &= worker_envelope_is_strict_and_canonical();
+    ok &= invalid_platform_values_are_rejected_before_encoding();
+    ok &= fixed_product_composition_is_typed_and_strict();
     return ok ? 0 : 1;
 }

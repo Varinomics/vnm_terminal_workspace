@@ -31,11 +31,14 @@ target_compile_features(vnm_terminal_workspace_request PUBLIC cxx_std_20)
 target_sources(vnm_terminal_workspace_request
     PRIVATE
         src/terminal_launch_request.cpp
+        src/terminal_worker_composition.cpp
+        src/terminal_worker_envelope.cpp
     PUBLIC
         FILE_SET HEADERS
         BASE_DIRS include
         FILES
-            include/vnm_terminal_workspace/terminal_launch_request.h)
+            include/vnm_terminal_workspace/terminal_launch_request.h
+            include/vnm_terminal_workspace/terminal_worker_envelope.h)
 target_link_libraries(vnm_terminal_workspace_request
     PUBLIC
         vnm_framework::vnm_environment_policy)
@@ -134,6 +137,12 @@ target_sources(vnm_terminal_workspace_owner_client
         BASE_DIRS include
         FILES
             include/vnm_terminal_workspace/terminal_owner_client.h)
+target_sources(vnm_terminal_workspace_owner_client
+    PUBLIC
+        FILE_SET HEADERS
+        BASE_DIRS include
+        FILES
+            include/vnm_terminal_workspace/terminal_worker_composition.h)
 target_include_directories(vnm_terminal_workspace_owner_client
     PRIVATE
         src
@@ -146,18 +155,33 @@ target_link_libraries(vnm_terminal_workspace_owner_client
     PRIVATE
         Qt6::Network)
 
-add_executable(vnm_terminal_workspace_owner_host
+add_library(vnm_terminal_workspace_owner_service STATIC
     src/terminal_owner_process_identity.cpp
     src/terminal_owner_service_main.cpp
     src/terminal_owner_wire.cpp)
-target_compile_features(vnm_terminal_workspace_owner_host PRIVATE cxx_std_20)
-target_include_directories(vnm_terminal_workspace_owner_host PRIVATE src)
-target_link_libraries(vnm_terminal_workspace_owner_host
-    PRIVATE
+add_library(
+    vnm_terminal_workspace::vnm_terminal_workspace_owner_service
+    ALIAS vnm_terminal_workspace_owner_service)
+target_compile_features(vnm_terminal_workspace_owner_service PUBLIC cxx_std_20)
+target_include_directories(vnm_terminal_workspace_owner_service
+    PRIVATE src
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(vnm_terminal_workspace_owner_service
+    PUBLIC
         vnm_terminal_workspace::vnm_terminal_workspace_owner
+    PRIVATE
         vnm_framework::vnm_remote_ui_runtime
         Qt6::Core
         Qt6::Network)
+
+add_executable(vnm_terminal_workspace_owner_host
+    src/terminal_owner_service_executable_main.cpp)
+target_compile_features(vnm_terminal_workspace_owner_host PRIVATE cxx_std_20)
+target_link_libraries(vnm_terminal_workspace_owner_host
+    PRIVATE
+        vnm_terminal_workspace::vnm_terminal_workspace_owner_service)
 
 set(_vnm_terminal_workspace_worker_output_dir
     "${CMAKE_CURRENT_BINARY_DIR}/bin/terminal_worker")
@@ -325,6 +349,7 @@ if(VNM_TERMINAL_WORKSPACE_BUILD_TESTS)
             vnm_terminal_workspace_owner_client_tests
             PRIVATE
                 vnm_terminal_workspace::vnm_terminal_workspace_owner_client
+                vnm_framework::vnm_surface
                 Qt6::Core
                 Qt6::Network)
         add_dependencies(
@@ -362,6 +387,7 @@ install(
         vnm_terminal_workspace_surface_provider
         vnm_terminal_workspace_owner
         vnm_terminal_workspace_owner_client
+        vnm_terminal_workspace_owner_service
     EXPORT vnm_terminal_workspace_targets
     FILE_SET HEADERS
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"

@@ -8,10 +8,12 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace vnm::terminal_workspace {
+
+template<typename Policy>
+class Terminal_owner_package_client;
 
 struct Terminal_owner_service_scope
 {
@@ -55,7 +57,6 @@ public:
     Terminal_owner_launch_result new_launch(
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
-        std::span<const std::string_view> additional_reserved_names = {},
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment = std::nullopt);
     Terminal_owner_update_outcome request_close(
@@ -81,6 +82,11 @@ public:
         std::uint64_t generation,
         std::uint64_t attachment_revision,
         const Terminal_remote_state_message& message);
+    Terminal_owner_message_submission_result submit_message(
+        const std::string& session_identity,
+        std::uint64_t generation,
+        std::uint64_t attachment_revision,
+        std::span<const std::uint8_t> message_utf8);
 
     bool contains_unprotected_settlement(
         const std::string& session_identity,
@@ -90,6 +96,19 @@ public:
         std::uint64_t generation);
 
 private:
+    Terminal_owner_launch_result new_launch_for_fixed_package(
+        std::span<const std::uint8_t> serialized_request,
+        Launch_platform platform,
+        Terminal_worker_surface_configuration surface_configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture,
+        std::string canonical_product_configuration,
+        std::optional<std::vector<environment_policy::Environment_entry>>
+            authorized_environment);
+
+    template<typename Policy>
+    friend class Terminal_owner_package_client;
+
     struct Impl;
 
     explicit Terminal_owner_client(std::unique_ptr<Impl> impl);

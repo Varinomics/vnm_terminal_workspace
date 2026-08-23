@@ -137,8 +137,7 @@ Request_validation validate_identity(
 
 Request_validation validate_request(
     const Terminal_launch_request& request,
-    Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names)
+    Launch_platform platform)
 {
     Request_validation identity = validate_identity(
         request.launch_request_id,
@@ -273,8 +272,7 @@ Request_validation validate_request(
     const environment_policy::Environment_sanitization_result sanitized =
         environment_policy::sanitize_explicit_base_environment(
             request.base_environment,
-            environment_platform(platform),
-            additional_reserved_names);
+            environment_platform(platform));
     if (!sanitized.accepted) {
         const std::size_t index = sanitized.issues.empty()
             ? 0U
@@ -466,13 +464,13 @@ Launch_request_result finish_request_result(
 
 Launch_request_result prepare_terminal_launch_request(
     Terminal_launch_request request,
-    Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names)
+    Launch_platform platform)
 {
-    Request_validation validation = validate_request(
-        request,
-        platform,
-        additional_reserved_names);
+    if (!valid_launch_platform(platform)) {
+        return malformed_request_result(
+            Launch_request_error::MALFORMED_PAYLOAD);
+    }
+    Request_validation validation = validate_request(request, platform);
     if (validation.status == Launch_request_status::REJECTED) {
         return finish_request_result(std::move(request), validation);
     }
@@ -495,9 +493,12 @@ Launch_request_result prepare_terminal_launch_request(
 
 Launch_request_result decode_terminal_launch_request(
     std::span<const std::uint8_t> serialized_request,
-    Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names)
+    Launch_platform platform)
 {
+    if (!valid_launch_platform(platform)) {
+        return malformed_request_result(
+            Launch_request_error::MALFORMED_PAYLOAD);
+    }
     if (serialized_request.size() >
         Terminal_launch_request_limits::maximum_payload_bytes)
     {
@@ -603,10 +604,7 @@ Launch_request_result decode_terminal_launch_request(
         return malformed_request_result(Launch_request_error::TRAILING_DATA);
     }
 
-    Request_validation validation = validate_request(
-        request,
-        platform,
-        additional_reserved_names);
+    Request_validation validation = validate_request(request, platform);
     return finish_request_result(std::move(request), validation);
 }
 

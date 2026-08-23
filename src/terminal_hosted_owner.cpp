@@ -1,10 +1,9 @@
 #include "terminal_hosted_owner.h"
 
+#include "vnm_terminal_workspace/terminal_worker_composition.h"
+
 #include <QByteArray>
 #include <QCryptographicHash>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -20,10 +19,6 @@ namespace {
 
 constexpr char k_fact_provider_class[] =
     "vnm_terminal_workspace.terminal_facts";
-constexpr char k_worker_package_id[] =
-    "vnm_terminal_workspace.terminal_worker";
-constexpr char k_worker_family_id[] = "vnm_terminal_workspace";
-
 QString acknowledgement_name(Terminal_child_fact_acknowledgement value)
 {
     switch (value)
@@ -68,6 +63,135 @@ std::optional<std::uint64_t> unsigned_value(const QVariant& value)
     return ok ? std::optional<std::uint64_t>(result) : std::nullopt;
 }
 
+void clear_string(std::string& value)
+{
+    volatile char* bytes = value.data();
+    for (std::size_t index = 0U; index < value.size(); ++index) {
+        bytes[index] = '\0';
+    }
+    value.clear();
+}
+
+void clear_string(QString& value)
+{
+    value.fill(QChar{});
+    value.clear();
+}
+
+void clear_environment_values(
+    std::optional<std::vector<environment_policy::Environment_entry>>& entries)
+{
+    if (!entries) {
+        return;
+    }
+    for (environment_policy::Environment_entry& entry : *entries) {
+        clear_string(entry.value);
+    }
+    entries.reset();
+}
+
+void clear_bytes(std::vector<std::uint8_t>& bytes)
+{
+    volatile std::uint8_t* data = bytes.data();
+    for (std::size_t index = 0U; index < bytes.size(); ++index) {
+        data[index] = 0U;
+    }
+    bytes.clear();
+}
+
+environment_policy::Environment_platform environment_platform(
+    Launch_platform platform)
+{
+    return platform == Launch_platform::WINDOWS
+        ? environment_policy::Environment_platform::WINDOWS
+        : environment_policy::Environment_platform::POSIX;
+}
+
+bool base_contains_bound_product_environment_name(
+    const Terminal_launch_request& request,
+    Launch_platform platform,
+    std::span<const std::string> product_environment_names)
+{
+    const auto environment = environment_platform(platform);
+    return std::any_of(
+        request.base_environment.begin(),
+        request.base_environment.end(),
+        [environment, product_environment_names](const auto& entry) {
+            return std::any_of(
+                product_environment_names.begin(),
+                product_environment_names.end(),
+                [environment, &entry](const std::string& fixed_name) {
+                    return environment_policy::environment_names_equal(
+                        entry.name,
+                        fixed_name,
+                        environment);
+                });
+        });
+}
+
+Terminal_worker_message_submission_outcome message_outcome(
+    VNM_Hosted_worker_message_outcome outcome)
+{
+    using Source = VNM_Hosted_worker_message_outcome;
+    using Target = Terminal_worker_message_submission_outcome;
+    switch (outcome)
+    {
+    case Source::ACCEPTED: return Target::ACCEPTED;
+    case Source::INVALID_UTF8: return Target::INVALID_UTF8;
+    case Source::INVALID_MESSAGE: return Target::INVALID_MESSAGE;
+    case Source::EMPTY_MESSAGE: return Target::EMPTY_MESSAGE;
+    case Source::MESSAGE_TOO_LARGE: return Target::MESSAGE_TOO_LARGE;
+    case Source::NOT_RUNNING: return Target::NOT_RUNNING;
+    case Source::CLOSING: return Target::CLOSING;
+    case Source::CAPABILITY_MISSING: return Target::CAPABILITY_MISSING;
+    case Source::STALE_GENERATION: return Target::STALE_GENERATION;
+    case Source::BACKPRESSURE: return Target::BACKPRESSURE;
+    case Source::QUEUE_LIMIT: return Target::QUEUE_LIMIT;
+    case Source::BACKEND_REJECTED: return Target::BACKEND_REJECTED;
+    case Source::WORKER_REJECTED: return Target::WORKER_REJECTED;
+    case Source::DEADLINE_EXPIRED: return Target::DEADLINE_EXPIRED;
+    case Source::INDETERMINATE: return Target::INDETERMINATE;
+    }
+    return Target::INDETERMINATE;
+}
+
+class Sensitive_environment_guard
+{
+public:
+    explicit Sensitive_environment_guard(
+        std::optional<
+            std::vector<environment_policy::Environment_entry>>& environment)
+    :
+        m_environment(environment)
+    {}
+
+    ~Sensitive_environment_guard()
+    {
+        clear_environment_values(m_environment);
+    }
+
+    Sensitive_environment_guard(const Sensitive_environment_guard&) = delete;
+    Sensitive_environment_guard& operator=(
+        const Sensitive_environment_guard&) = delete;
+
+private:
+    std::optional<std::vector<environment_policy::Environment_entry>>&
+        m_environment;
+};
+
+class Sensitive_string_guard
+{
+public:
+    explicit Sensitive_string_guard(std::string& value) : m_value(value) {}
+    ~Sensitive_string_guard() { clear_string(m_value); }
+
+    Sensitive_string_guard(const Sensitive_string_guard&) = delete;
+    Sensitive_string_guard& operator=(const Sensitive_string_guard&) = delete;
+
+private:
+    std::string& m_value;
+};
+
 } // namespace
 
 struct Terminal_hosted_owner::Live_session
@@ -107,6 +231,35 @@ Terminal_hosted_owner::Terminal_hosted_owner(
                 cause);
         })
 {
+    if (!m_configuration.encode_parameters) {
+        m_configuration.package_id =
+            Neutral_terminal_worker_package_policy::package_id;
+        m_configuration.family_id =
+            Neutral_terminal_worker_package_policy::family_id;
+        m_configuration.capabilities.assign(
+            Neutral_terminal_worker_package_policy::capabilities.begin(),
+            Neutral_terminal_worker_package_policy::capabilities.end());
+        m_configuration.product_environment_names.clear();
+        m_configuration.encode_parameters = [](
+            const Terminal_worker_envelope& envelope,
+            std::string_view configuration)
+                -> std::optional<std::string>
+        {
+            const auto decoded =
+                Neutral_terminal_worker_package_policy::
+                    decode_configuration(configuration);
+            if (!decoded) {
+                return std::nullopt;
+            }
+            auto encoded = encode_terminal_worker_fixed_parameters<
+                Neutral_terminal_worker_package_policy>(envelope, *decoded);
+            return encoded.error ==
+                    Terminal_worker_fixed_parameters_error::NONE
+                ? std::optional<std::string>(
+                    std::move(encoded.serialized_parameters))
+                : std::nullopt;
+        };
+    }
     register_fact_provider();
 }
 
@@ -120,23 +273,67 @@ Terminal_hosted_owner::~Terminal_hosted_owner()
 Terminal_hosted_launch_result Terminal_hosted_owner::launch(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names,
     std::optional<std::vector<environment_policy::Environment_entry>>
         authorized_environment,
-    std::shared_ptr<Terminal_lifetime_capability> lifetime_capability)
+    std::shared_ptr<Terminal_lifetime_capability> lifetime_capability,
+    Terminal_worker_surface_configuration surface_configuration,
+    std::optional<Terminal_worker_output_capture_configuration> output_capture,
+    std::string canonical_product_configuration)
 {
-    const Launch_request_result decoded = decode_terminal_launch_request(
+    Sensitive_environment_guard environment_guard(authorized_environment);
+    Sensitive_string_guard configuration_guard(
+        canonical_product_configuration);
+    Launch_request_result decoded = decode_terminal_launch_request(
         serialized_request,
-        platform,
-        additional_reserved_names);
+        platform);
+    Sensitive_launch_request_guard request_guard(decoded);
     if (decoded.status == Launch_request_status::CANCELLED) {
         return {Terminal_hosted_launch_outcome::CANCELLED};
     }
     if (decoded.status != Launch_request_status::ACCEPTED || !decoded.request) {
         return {Terminal_hosted_launch_outcome::INVALID_REQUEST};
     }
+    if (base_contains_bound_product_environment_name(
+            *decoded.request,
+            platform,
+            m_configuration.product_environment_names))
+    {
+        return {Terminal_hosted_launch_outcome::INVALID_REQUEST};
+    }
 
     const Terminal_launch_request& request = *decoded.request;
+    const auto names_equal = [platform](
+        std::string_view left,
+        std::string_view right) {
+        return environment_policy::environment_names_equal(
+            left,
+            right,
+            environment_platform(platform));
+    };
+    if (authorized_environment) {
+        for (std::size_t index = 0U;
+             index < authorized_environment->size();
+             ++index)
+        {
+            const std::string_view name = (*authorized_environment)[index].name;
+            const bool fixed_name = std::any_of(
+                m_configuration.product_environment_names.begin(),
+                m_configuration.product_environment_names.end(),
+                [name, &names_equal](const std::string& allowed) {
+                    return names_equal(name, allowed);
+                });
+            const bool duplicate = std::any_of(
+                authorized_environment->begin(),
+                authorized_environment->begin() +
+                    static_cast<std::ptrdiff_t>(index),
+                [name, &names_equal](const auto& entry) {
+                    return names_equal(name, entry.name);
+                });
+            if (!fixed_name || duplicate) {
+                return {Terminal_hosted_launch_outcome::INVALID_REQUEST};
+            }
+        }
+    }
     if (m_sessions.contains(request.session_id) ||
         m_core.custody(request.session_id))
     {
@@ -166,11 +363,21 @@ Terminal_hosted_launch_result Terminal_hosted_owner::launch(
     live->session->set_host_executable_path(
         m_configuration.host_executable_path);
     live->session->set_worker_dll_path(m_configuration.worker_dll_path);
-    live->session->set_worker_start_payload(worker_payload(
+    QString start_payload = worker_payload(
         serialized_request,
         platform,
-        additional_reserved_names,
-        authorized_environment));
+        surface_configuration,
+        output_capture,
+        canonical_product_configuration,
+        authorized_environment);
+    if (start_payload.isEmpty()) {
+        return {
+            Terminal_hosted_launch_outcome::INVALID_REQUEST,
+            request.session_id,
+        };
+    }
+    live->session->set_worker_start_payload(start_payload);
+    clear_string(start_payload);
     live->session->set_session_id(framework_session_id);
     live->session->set_auto_restart_enabled(false);
     live->session->set_max_auto_restarts(0);
@@ -330,6 +537,32 @@ Terminal_proxy_gate_outcome Terminal_hosted_owner::forward_state(
         });
 }
 
+Terminal_hosted_message_submission_result Terminal_hosted_owner::submit_message(
+    std::uint64_t caller_transport_process_id,
+    VNM_viewer_authority_epoch expected_epoch,
+    const std::string& session_identity,
+    std::uint64_t generation,
+    std::uint64_t attachment_revision,
+    std::span<const std::uint8_t> message_utf8)
+{
+    Terminal_hosted_message_submission_result result;
+    const auto live = m_sessions.find(session_identity);
+    if (live == m_sessions.end() || live->second->generation != generation) {
+        result.routing = Terminal_proxy_gate_outcome::NO_CUSTODY;
+        return result;
+    }
+    result.routing = m_proxy_gate.submit_message(
+        caller_transport_process_id,
+        expected_epoch,
+        session_identity,
+        generation,
+        attachment_revision,
+        [this, &result, session = live->second.get(), message_utf8]() {
+            result.submission = send_message(*session, message_utf8);
+        });
+    return result;
+}
+
 std::optional<Terminal_custody_snapshot> Terminal_hosted_owner::custody(
     const std::string& session_identity) const
 {
@@ -391,50 +624,36 @@ Terminal_cleanup_disposition Terminal_hosted_owner::cleanup_disposition(
 QString Terminal_hosted_owner::worker_payload(
     std::span<const std::uint8_t> serialized_request,
     Launch_platform platform,
-    std::span<const std::string_view> additional_reserved_names,
+    const Terminal_worker_surface_configuration& surface_configuration,
+    const std::optional<Terminal_worker_output_capture_configuration>&
+        output_capture,
+    std::string_view canonical_product_configuration,
     const std::optional<std::vector<environment_policy::Environment_entry>>&
         authorized_environment) const
 {
-    QJsonArray reserved;
-    for (const std::string_view name : additional_reserved_names) {
-        reserved.append(QString::fromUtf8(
-            name.data(),
-            static_cast<qsizetype>(name.size())));
+    Terminal_worker_envelope envelope;
+    envelope.provider_namespace =
+        m_configuration.provider_namespace.toStdString();
+    envelope.serialized_request.assign(
+        serialized_request.begin(),
+        serialized_request.end());
+    envelope.platform = platform;
+    envelope.surface_configuration = surface_configuration;
+    envelope.output_capture = output_capture;
+    envelope.authorized_environment = authorized_environment;
+    std::optional<std::string> encoded = m_configuration.encode_parameters
+        ? m_configuration.encode_parameters(
+            envelope,
+            canonical_product_configuration)
+        : std::nullopt;
+    clear_bytes(envelope.serialized_request);
+    clear_environment_values(envelope.authorized_environment);
+    if (!encoded) {
+        return {};
     }
-    QJsonArray authorized;
-    if (authorized_environment) {
-        for (const environment_policy::Environment_entry& entry :
-             *authorized_environment)
-        {
-            authorized.append(QJsonObject{
-                {QStringLiteral("name"), QString::fromUtf8(
-                    entry.name.data(),
-                    static_cast<qsizetype>(entry.name.size()))},
-                {QStringLiteral("value"), QString::fromUtf8(
-                    entry.value.data(),
-                    static_cast<qsizetype>(entry.value.size()))},
-            });
-        }
-    }
-    const QByteArray request_bytes(
-        reinterpret_cast<const char*>(serialized_request.data()),
-        static_cast<qsizetype>(serialized_request.size()));
-    QJsonObject payload{
-        {QStringLiteral("schema_version"), 1},
-        {QStringLiteral("provider_namespace"),
-            m_configuration.provider_namespace},
-        {QStringLiteral("request_base64"),
-            QString::fromLatin1(request_bytes.toBase64())},
-        {QStringLiteral("platform"), platform == Launch_platform::WINDOWS
-            ? QStringLiteral("windows")
-            : QStringLiteral("posix")},
-        {QStringLiteral("additional_reserved_names"), reserved},
-        {QStringLiteral("authorized_environment_present"),
-            authorized_environment.has_value()},
-        {QStringLiteral("authorized_environment"), authorized},
-    };
-    return QString::fromUtf8(
-        QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    QString result = QString::fromStdString(*encoded);
+    clear_string(*encoded);
+    return result;
 }
 
 void Terminal_hosted_owner::register_fact_provider()
@@ -767,8 +986,10 @@ Terminal_hosted_owner::live_for_framework_caller(
 {
     if (!call.caller.has_caller_session() ||
         call.caller.caller_worker_generation == 0U ||
-        call.caller.caller_package_id != QString::fromLatin1(k_worker_package_id) ||
-        call.caller.caller_family_id != QString::fromLatin1(k_worker_family_id))
+        call.caller.caller_package_id !=
+            QString::fromStdString(m_configuration.package_id) ||
+        call.caller.caller_family_id !=
+            QString::fromStdString(m_configuration.family_id))
     {
         return nullptr;
     }
@@ -890,6 +1111,24 @@ void Terminal_hosted_owner::send_state(
         live.session->send_dark_mode(message.value != 0U);
         break;
     }
+}
+
+Terminal_worker_message_submission_result Terminal_hosted_owner::send_message(
+    Live_session& live,
+    std::span<const std::uint8_t> message_utf8)
+{
+    QByteArray message(
+        reinterpret_cast<const char*>(message_utf8.data()),
+        static_cast<qsizetype>(message_utf8.size()));
+    const VNM_Hosted_worker_message_result result =
+        live.session->submit_message(
+            live.generation,
+            std::move(message),
+            QStringLiteral("terminal-workspace-owner-message"));
+    return {
+        message_outcome(result.outcome),
+        result.error.toStdString(),
+    };
 }
 
 } // namespace vnm::terminal_workspace::detail

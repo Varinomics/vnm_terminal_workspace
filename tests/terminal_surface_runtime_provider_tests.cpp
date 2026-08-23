@@ -47,6 +47,66 @@ bool check(bool condition, std::string_view message)
     return false;
 }
 
+workspace::Terminal_worker_noop_complete_settings_sink& noop_settings_sink()
+{
+    static workspace::Terminal_worker_noop_complete_settings_sink sink;
+    return sink;
+}
+
+workspace::Terminal_worker_noop_diagnostic_observation_sink&
+noop_diagnostic_sink()
+{
+    static workspace::Terminal_worker_noop_diagnostic_observation_sink sink;
+    return sink;
+}
+
+class Recording_settings_sink final :
+    public workspace::Terminal_worker_complete_settings_sink
+{
+public:
+    void accept_complete_settings(
+        const workspace::Terminal_worker_settings& settings) override
+    {
+        ++calls;
+        latest = settings;
+    }
+
+    std::optional<workspace::Terminal_worker_settings> latest;
+    int calls = 0;
+};
+
+class Recording_diagnostic_sink final :
+    public workspace::Terminal_worker_diagnostic_observation_sink
+{
+public:
+    void terminal_output_activity() override
+    {
+        ++output_activity_calls;
+    }
+
+    void terminal_first_text_frame_produced(
+        const workspace::Terminal_worker_first_text_frame_observation&
+            observation) override
+    {
+        ++first_text_frame_calls;
+        first_text_frame = observation;
+    }
+
+    void terminal_backend_error(
+        const workspace::Terminal_worker_backend_error_observation&
+            observation) override
+    {
+        backend_error = observation;
+    }
+
+    std::optional<workspace::Terminal_worker_first_text_frame_observation>
+        first_text_frame;
+    std::optional<workspace::Terminal_worker_backend_error_observation>
+        backend_error;
+    int output_activity_calls = 0;
+    int first_text_frame_calls = 0;
+};
+
 bool process_gui_events_until(const std::function<bool()>& condition)
 {
     QDeadlineTimer deadline(5000);
@@ -86,7 +146,7 @@ QString environment_value(const wchar_t* name)
     return QString::fromStdWString(value);
 }
 
-int run_child(const QString& evidence_path)
+int run_child(const QString& evidence_path, bool emit_terminal_output)
 {
     QFile evidence(evidence_path);
     if (!evidence.open(QIODevice::WriteOnly | QIODevice::Truncate |
@@ -118,6 +178,17 @@ int run_child(const QString& evidence_path)
     stream << "colorterm=" << environment_value(L"COLORTERM") << '\n';
     stream.flush();
     evidence.close();
+    if (emit_terminal_output) {
+        constexpr char output[] = "workspace first text frame\r\n";
+        DWORD written = 0U;
+        static_cast<void>(WriteFile(
+            GetStdHandle(STD_OUTPUT_HANDLE),
+            output,
+            static_cast<DWORD>(sizeof(output) - 1U),
+            &written,
+            nullptr));
+        Sleep(300U);
+    }
     return 17;
 }
 
@@ -418,7 +489,8 @@ std::vector<environment::Environment_entry> launch_environment(
 workspace::Launch_request_result request_payload(
     std::string executable,
     const Fixture_paths& paths,
-    std::vector<environment::Environment_entry> base_environment)
+    std::vector<environment::Environment_entry> base_environment,
+    bool emit_terminal_output = false)
 {
     workspace::Terminal_launch_request request;
     request.launch_request_id = "provider-request";
@@ -427,6 +499,7 @@ workspace::Launch_request_result request_payload(
         std::move(executable),
         "--workspace-provider-child",
         utf8(paths.evidence),
+        emit_terminal_output ? "--emit-output" : "--no-output",
     };
     request.working_directory = utf8(paths.working_directory);
     request.base_environment_complete = true;
@@ -459,6 +532,8 @@ bool provider_construction_was_neutral_and_complete(
     const auto observation = provider.test_observation();
     return observation.surface_construction_count == 1U &&
         observation.surface_alive && observation.scrollbar_alive &&
+        observation.search_bar_alive && observation.settings_window_alive &&
+        observation.shortcut_filter_alive &&
         observation.remote_runtime_initialized &&
         sink.create_calls == 1 && dispatcher.blocking_calls >= 1 &&
         termination.calls == 1;
@@ -466,17 +541,27 @@ bool provider_construction_was_neutral_and_complete(
 
 bool remote_runtime_value_controls_and_teardown_are_owned()
 {
+    QTemporaryDir capture_directory;
     Recording_remote_sink sink;
     sink.configured_initial_state.logical_width = 420;
     sink.configured_initial_state.logical_height = 240;
     sink.configured_initial_state.scale_factor = 1.0F;
     Immediate_gui_dispatcher dispatcher;
     Recording_termination termination;
+    Recording_settings_sink settings_sink;
+    Recording_diagnostic_sink diagnostic_sink;
+    const workspace::Terminal_worker_output_capture_configuration capture{
+        utf8(capture_directory.filePath(QStringLiteral("terminal-output"))),
+        4096U,
+    };
     runtime_detail::Terminal_surface_runtime_adapter provider(
         provider_configuration(),
+        capture,
         sink,
         dispatcher,
-        termination);
+        termination,
+        settings_sink,
+        diagnostic_sink);
 
     bool ok = true;
     ok &= check(
@@ -485,8 +570,12 @@ bool remote_runtime_value_controls_and_teardown_are_owned()
         "real remote runtime must initialize the fixed packaged worker root");
     const auto initialized = provider.test_observation();
     ok &= check(
-        initialized.surface_construction_count == 1U &&
+            initialized.surface_construction_count == 1U &&
             initialized.surface_alive && initialized.scrollbar_alive &&
+            initialized.search_bar_alive &&
+            initialized.settings_window_alive &&
+            initialized.shortcut_filter_alive &&
+            initialized.output_capture_configured &&
             initialized.remote_runtime_initialized &&
             initialized.surface_has_focus &&
             initialized.surface_width == 408.0 &&
@@ -513,7 +602,10 @@ bool remote_runtime_value_controls_and_teardown_are_owned()
     });
     ok &= check(
         controls_admitted && controls_processed &&
-            provider.test_inject_timestamp_request(),
+            provider.test_inject_timestamp_request() &&
+            provider.test_set_font_size(16.0) &&
+            provider.test_inject_output_activity() &&
+            provider.test_inject_backend_error(),
         "value input/state/present and internal timestamp connections must forward");
     const auto updated = provider.test_observation();
     ok &= check(
@@ -521,6 +613,18 @@ bool remote_runtime_value_controls_and_teardown_are_owned()
             updated.timestamp_visible && dispatcher.queued_calls >= 2 &&
             sink.begin_calls >= 1 && sink.end_calls >= 1,
         "resize/present must reach the real runtime, internal layout, and sink");
+    ok &= check(
+        settings_sink.calls == 1 && settings_sink.latest &&
+            settings_sink.latest->font_size == 16.0,
+        "a user settings change must publish one complete settings value");
+    ok &= check(
+        diagnostic_sink.output_activity_calls == 1 &&
+            diagnostic_sink.first_text_frame_calls == 0 &&
+            !diagnostic_sink.first_text_frame &&
+            diagnostic_sink.backend_error &&
+            diagnostic_sink.backend_error->message ==
+                "synthetic backend diagnostic",
+        "control-only diagnostics must preserve activity and bounded errors without inventing a text frame");
 
     provider.shutdown();
     const auto shutdown = provider.test_observation();
@@ -537,9 +641,12 @@ bool remote_runtime_value_controls_and_teardown_are_owned()
     Recording_termination failed_sink_termination;
     runtime_detail::Terminal_surface_runtime_adapter failed_sink_provider(
         provider_configuration(),
+        std::nullopt,
         failed_sink,
         failed_sink_dispatcher,
-        failed_sink_termination);
+        failed_sink_termination,
+        noop_settings_sink(),
+        noop_diagnostic_sink());
     ok &= check(
         failed_sink_provider.initialize() ==
             workspace::Terminal_worker_initialization_result::
@@ -554,9 +661,12 @@ bool remote_runtime_value_controls_and_teardown_are_owned()
     Recording_termination failed_dispatch_termination;
     runtime_detail::Terminal_surface_runtime_adapter failed_dispatch_provider(
         provider_configuration(),
+        std::nullopt,
         failed_dispatch_sink,
         failed_dispatcher,
-        failed_dispatch_termination);
+        failed_dispatch_termination,
+        noop_settings_sink(),
+        noop_diagnostic_sink());
     ok &= check(
         failed_dispatch_provider.initialize() ==
             workspace::Terminal_worker_initialization_result::
@@ -592,9 +702,12 @@ bool pre_native_cancel_allocates_no_backend_or_pid()
     Recording_termination termination;
     runtime_detail::Terminal_surface_runtime_adapter provider(
         provider_configuration(),
+        std::nullopt,
         sink,
         dispatcher,
         termination,
+        noop_settings_sink(),
+        noop_diagnostic_sink(),
         [&barrier] { return barrier.wait(); });
     runtime_detail::Terminal_worker_coordinator runtime(provider, transport);
     const auto initialized = provider.initialize();
@@ -647,7 +760,8 @@ bool released_start_dispatches_once_with_exact_environment()
     const workspace::Launch_request_result prepared = request_payload(
         "workspace-provider-child.exe",
         *fixture,
-        launch_environment(*fixture));
+        launch_environment(*fixture),
+        true);
     if (!check(prepared.status == workspace::Launch_request_status::ACCEPTED,
         "release request must encode"))
     {
@@ -659,11 +773,15 @@ bool released_start_dispatches_once_with_exact_environment()
     Immediate_gui_dispatcher dispatcher;
     Recording_transport transport;
     Recording_termination termination;
+    Recording_diagnostic_sink diagnostic_sink;
     runtime_detail::Terminal_surface_runtime_adapter provider(
         provider_configuration(),
+        std::nullopt,
         sink,
         dispatcher,
         termination,
+        noop_settings_sink(),
+        diagnostic_sink,
         [&barrier] { return barrier.wait(); });
     runtime_detail::Terminal_worker_coordinator runtime(provider, transport);
     const auto initialized = provider.initialize();
@@ -684,7 +802,6 @@ bool released_start_dispatches_once_with_exact_environment()
             prepared.serialized_request,
             workspace::Launch_platform::WINDOWS,
             102U,
-            {},
             authorized);
     observer.join();
     QFile evidence(fixture->evidence);
@@ -728,6 +845,20 @@ bool released_start_dispatches_once_with_exact_environment()
     ok &= check(
         process_count_for_image(fixture->child_image) == 0U,
         "controlled child must be gone after the exit fact is reconciled");
+    ok &= check(
+        diagnostic_sink.output_activity_calls == 1 &&
+            diagnostic_sink.first_text_frame_calls == 1 &&
+            diagnostic_sink.first_text_frame &&
+            diagnostic_sink.first_text_frame->backend_ready &&
+            diagnostic_sink.first_text_frame->drew &&
+            (diagnostic_sink.first_text_frame->glyph_draw_calls > 0U ||
+             diagnostic_sink.first_text_frame->msdf_text_draw_calls > 0U),
+        "real child output must publish one content-backed first-text-frame observation");
+    const bool post_frame_present = provider.request_present();
+    QCoreApplication::processEvents();
+    ok &= check(
+        post_frame_present && diagnostic_sink.first_text_frame_calls == 1,
+        "later control-only presentation must not republish the first text frame");
     return ok;
 }
 
@@ -758,10 +889,13 @@ bool path_absent_and_empty_are_not_inherited()
         Recording_termination termination;
         workspace::Terminal_worker_runtime runtime(
             provider_configuration(),
+            std::nullopt,
             sink,
             dispatcher,
             transport,
-            termination);
+            termination,
+            noop_settings_sink(),
+            noop_diagnostic_sink());
         const auto initialized = runtime.initialize();
 
         const auto result = runtime.run(
@@ -803,9 +937,12 @@ bool cwd_is_revalidated_immediately_before_native_dispatch()
     Recording_termination termination;
     runtime_detail::Terminal_surface_runtime_adapter provider(
         provider_configuration(),
+        std::nullopt,
         sink,
         dispatcher,
         termination,
+        noop_settings_sink(),
+        noop_diagnostic_sink(),
         [fixture] {
             return QDir(fixture->working_directory).removeRecursively()
                 ? runtime_detail::Terminal_native_start_admission::RELEASE
@@ -872,17 +1009,19 @@ bool authorized_environment_cannot_change_surface_owned_or_lookup_names()
         Recording_termination termination;
         workspace::Terminal_worker_runtime runtime(
             provider_configuration(),
+            std::nullopt,
             sink,
             dispatcher,
             transport,
-            termination);
+            termination,
+            noop_settings_sink(),
+            noop_diagnostic_sink());
         const auto initialized = runtime.initialize();
 
         const auto result = runtime.run(
             prepared.serialized_request,
             workspace::Launch_platform::WINDOWS,
             generation++,
-            {},
             rejection.authorized);
         ok &= check(
             initialized ==
@@ -903,10 +1042,12 @@ bool authorized_environment_cannot_change_surface_owned_or_lookup_names()
 
 int main(int argc, char** argv)
 {
-    if (argc == 3 && std::string_view(argv[1]) ==
+    if (argc == 4 && std::string_view(argv[1]) ==
         "--workspace-provider-child")
     {
-        return run_child(QString::fromUtf8(argv[2]));
+        return run_child(
+            QString::fromUtf8(argv[2]),
+            std::string_view(argv[3]) == "--emit-output");
     }
 
     QGuiApplication application(argc, argv);

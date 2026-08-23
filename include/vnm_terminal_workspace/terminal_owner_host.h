@@ -9,10 +9,14 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace vnm::terminal_workspace {
+
+namespace detail {
+struct Terminal_owner_service_access;
+struct Terminal_worker_fixed_package_binding;
+}
 
 enum class Terminal_owner_custody_state
 {
@@ -150,6 +154,13 @@ enum class Terminal_owner_proxy_outcome
     INVALID_MESSAGE,
 };
 
+struct Terminal_owner_message_submission_result
+{
+    Terminal_owner_proxy_outcome routing =
+        Terminal_owner_proxy_outcome::AUTHORITY_REJECTED;
+    std::optional<Terminal_worker_message_submission_result> submission;
+};
+
 struct Terminal_owner_viewer_identity
 {
     std::uint64_t transport_process_id = 0U;
@@ -235,7 +246,6 @@ public:
     Terminal_owner_launch_result new_launch(
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
-        std::span<const std::string_view> additional_reserved_names = {},
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment = std::nullopt,
         std::shared_ptr<Terminal_owner_lifetime_capability>
@@ -274,6 +284,13 @@ public:
         std::uint64_t generation,
         std::uint64_t attachment_revision,
         const Terminal_remote_state_message& message);
+    Terminal_owner_message_submission_result submit_message(
+        std::uint64_t caller_transport_process_id,
+        Terminal_owner_viewer_epoch expected_epoch,
+        const std::string& session_identity,
+        std::uint64_t generation,
+        std::uint64_t attachment_revision,
+        std::span<const std::uint8_t> message_utf8);
 
     Terminal_owner_viewer_transport_departure_outcome
         note_viewer_transport_departure(
@@ -301,6 +318,23 @@ public:
     void purge_unprotected_settlements_for_shutdown();
 
 private:
+    Terminal_owner_host(
+        Terminal_owner_host_configuration configuration,
+        const detail::Terminal_worker_fixed_package_binding& binding);
+    Terminal_owner_launch_result new_launch_for_fixed_package(
+        std::span<const std::uint8_t> serialized_request,
+        Launch_platform platform,
+        Terminal_worker_surface_configuration surface_configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture,
+        std::string canonical_product_configuration,
+        std::optional<std::vector<environment_policy::Environment_entry>>
+            authorized_environment,
+        std::shared_ptr<Terminal_owner_lifetime_capability>
+            lifetime_capability = {});
+
+    friend struct detail::Terminal_owner_service_access;
+
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };

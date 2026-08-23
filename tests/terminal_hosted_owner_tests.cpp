@@ -22,6 +22,7 @@
 
 namespace workspace = vnm::terminal_workspace;
 namespace detail = vnm::terminal_workspace::detail;
+namespace environment = vnm::environment_policy;
 
 namespace {
 
@@ -52,7 +53,9 @@ bool wait_until(const std::function<bool()>& predicate, int timeout_ms)
 workspace::Launch_request_result prepared_request(
     const QTemporaryDir& directory,
     std::string launch_request_identity = "hosted-owner-launch",
-    std::string session_identity = "hosted-owner-session")
+    std::string session_identity = "hosted-owner-session",
+    std::optional<environment::Environment_entry> additional_base =
+        std::nullopt)
 {
     workspace::Terminal_launch_request request;
     request.launch_request_id = std::move(launch_request_identity);
@@ -75,6 +78,9 @@ workspace::Launch_request_result prepared_request(
         {"TEMP", request.working_directory},
         {"TMP", request.working_directory},
     };
+    if (additional_base) {
+        request.base_environment.push_back(std::move(*additional_base));
+    }
     request.cancellation.identity = "hosted-owner-cancellation";
     return workspace::prepare_terminal_launch_request(
         std::move(request),
@@ -353,7 +359,6 @@ bool rejected_causes_survive_typed_start_failure_and_identity_reuse()
         const detail::Terminal_hosted_launch_result launch = owner.launch(
             request.serialized_request,
             workspace::Launch_platform::WINDOWS,
-            {},
             std::nullopt,
             capability);
         ok &= check(
@@ -435,7 +440,6 @@ bool rejected_close_cause_survives_running_crash_without_reuse_leak()
     const detail::Terminal_hosted_launch_result first_launch = owner.launch(
         request.serialized_request,
         workspace::Launch_platform::WINDOWS,
-        {},
         std::nullopt,
         first_capability);
     bool ok = true;
@@ -463,7 +467,6 @@ bool rejected_close_cause_survives_running_crash_without_reuse_leak()
     const detail::Terminal_hosted_launch_result reused_launch = owner.launch(
         request.serialized_request,
         workspace::Launch_platform::WINDOWS,
-        {},
         std::nullopt,
         reused_capability);
     hosted_session->terminal_crash(23);
@@ -505,7 +508,6 @@ bool real_hosted_worker_reconciles_and_settles()
     const workspace::Terminal_owner_launch_result launch = owner.new_launch(
         request.serialized_request,
         workspace::Launch_platform::WINDOWS,
-        {},
         std::nullopt,
         capability);
     bool ok = true;
@@ -543,6 +545,124 @@ bool real_hosted_worker_reconciles_and_settles()
     return ok;
 }
 
+bool neutral_package_rejects_product_environment()
+{
+    QTemporaryDir directory;
+    const workspace::Launch_request_result request = prepared_request(
+        directory,
+        "neutral-policy-launch",
+        "neutral-policy-session");
+    if (!check(
+            directory.isValid() &&
+                request.status == workspace::Launch_request_status::ACCEPTED,
+            "the neutral package-policy request must prepare"))
+    {
+        return false;
+    }
+
+    workspace::Terminal_owner_host owner({
+        VNM_TW_TEST_HOST_PATH,
+        VNM_TW_TEST_WORKER_PATH,
+        "vnm_terminal_workspace.neutral_policy",
+    });
+    const auto capability = std::make_shared<Keeping_capability>();
+    std::optional<std::vector<environment::Environment_entry>> environment =
+        std::vector<environment::Environment_entry>{
+            {"PRODUCT_ONLY_NAME", "sensitive-value"},
+        };
+    const workspace::Terminal_owner_launch_result launch = owner.new_launch(
+        request.serialized_request,
+        workspace::Launch_platform::WINDOWS,
+        environment,
+        capability);
+    volatile char* secret = environment->front().value.data();
+    for (std::size_t index = 0U;
+         index < environment->front().value.size();
+         ++index)
+    {
+        secret[index] = '\0';
+    }
+    environment.reset();
+
+    return check(
+        launch.outcome ==
+                workspace::Terminal_owner_launch_outcome::INVALID_REQUEST &&
+            launch.generation == 0U && owner.custodies().empty() &&
+            !capability->settlement,
+        "the fixed neutral package must reject every product environment name");
+}
+
+bool fixed_product_name_is_reserved_without_optional_contribution()
+{
+    QTemporaryDir directory;
+    const workspace::Launch_request_result injected = prepared_request(
+        directory,
+        "fixed-base-injection-launch",
+        "fixed-base-injection-session",
+        environment::Environment_entry{
+            "PRODUCT_ONLY_NAME",
+            "base-secret",
+        });
+    const workspace::Launch_request_result valid = prepared_request(
+        directory,
+        "fixed-contribution-launch",
+        "fixed-contribution-session");
+    detail::Terminal_hosted_owner_configuration configuration;
+    configuration.provider_namespace =
+        QStringLiteral("vnm_terminal_workspace.fixed_product_policy");
+    configuration.package_id = "fixed.product.worker";
+    configuration.family_id = "fixed.product";
+    configuration.capabilities = {
+        workspace::Terminal_worker_package_capability::REMOTE_UI,
+    };
+    configuration.product_environment_names = {"PRODUCT_ONLY_NAME"};
+    configuration.encode_parameters = [](
+        const workspace::Terminal_worker_envelope& envelope,
+        std::string_view product_configuration)
+            -> std::optional<std::string>
+    {
+        if (!product_configuration.empty()) {
+            return std::nullopt;
+        }
+        workspace::Terminal_worker_envelope_result encoded =
+            workspace::encode_terminal_worker_envelope(envelope);
+        return encoded.error == workspace::Terminal_worker_envelope_error::NONE
+            ? std::optional<std::string>(
+                std::move(encoded.serialized_envelope))
+            : std::nullopt;
+    };
+    detail::Terminal_hosted_owner_test_hooks hooks;
+    hooks.start_async = [](vnm::VNM_Hosted_worker_session&) {
+        return false;
+    };
+    detail::Terminal_hosted_owner owner(
+        std::move(configuration),
+        std::move(hooks));
+
+    const detail::Terminal_hosted_launch_result rejected = owner.launch(
+        injected.serialized_request,
+        workspace::Launch_platform::WINDOWS);
+    std::optional<std::vector<environment::Environment_entry>> contribution =
+        std::vector<environment::Environment_entry>{
+            {"PRODUCT_ONLY_NAME", "authorized-secret"},
+        };
+    const detail::Terminal_hosted_launch_result allowed = owner.launch(
+        valid.serialized_request,
+        workspace::Launch_platform::WINDOWS,
+        std::move(contribution));
+    return check(
+        directory.isValid() &&
+            injected.status == workspace::Launch_request_status::ACCEPTED &&
+            rejected.outcome ==
+                detail::Terminal_hosted_launch_outcome::INVALID_REQUEST &&
+            rejected.generation == 0U &&
+            allowed.outcome ==
+                detail::Terminal_hosted_launch_outcome::HOST_START_REJECTED &&
+            owner.custodies().empty(),
+        "a fixed product name must reject from base without a contribution "
+        "while remaining available to the exact authorized contribution");
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -558,6 +678,8 @@ int main(int argc, char* argv[])
     ok &= rejected_causes_survive_typed_start_failure_and_identity_reuse();
     ok &= rejected_close_cause_survives_running_crash_without_reuse_leak();
     ok &= real_hosted_worker_reconciles_and_settles();
+    ok &= neutral_package_rejects_product_environment();
+    ok &= fixed_product_name_is_reserved_without_optional_contribution();
     const auto completion =
         vnm::VNM_RemoteRuntime::shutdown_with_completion();
     return ok && completion ==

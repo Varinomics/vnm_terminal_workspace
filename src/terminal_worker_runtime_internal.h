@@ -72,14 +72,12 @@ public:
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
         std::uint64_t hosted_generation,
-        std::span<const std::string_view> additional_reserved_names = {},
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment = std::nullopt);
     Terminal_worker_run_result run_preinitialized(
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
         std::uint64_t hosted_generation,
-        std::span<const std::string_view> additional_reserved_names = {},
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment = std::nullopt);
 
@@ -92,7 +90,6 @@ private:
         std::span<const std::uint8_t> serialized_request,
         Launch_platform platform,
         std::uint64_t hosted_generation,
-        std::span<const std::string_view> additional_reserved_names,
         std::optional<std::vector<environment_policy::Environment_entry>>
             authorized_environment,
         bool initialize_adapter);
@@ -130,9 +127,13 @@ class Terminal_surface_runtime_adapter final :
 public:
     Terminal_surface_runtime_adapter(
         Terminal_worker_surface_configuration configuration,
+        std::optional<Terminal_worker_output_capture_configuration>
+            output_capture,
         Terminal_worker_remote_sink& remote_sink,
         Terminal_worker_gui_dispatcher& gui_dispatcher,
         Terminal_worker_termination& termination,
+        Terminal_worker_complete_settings_sink& complete_settings_sink,
+        Terminal_worker_diagnostic_observation_sink& diagnostic_sink,
         Terminal_native_start_admission_hook admission_hook = {});
     ~Terminal_surface_runtime_adapter() override;
 
@@ -145,6 +146,8 @@ public:
     bool forward_input(const Terminal_remote_input_message& message);
     bool forward_state(const Terminal_remote_state_message& message);
     bool request_present();
+    Terminal_worker_message_submission_result submit_message(
+        std::span<const std::uint8_t> message_utf8);
     void shutdown();
 
     bool initialize_remote_runtime() override;
@@ -166,6 +169,10 @@ public:
         std::size_t structured_start_call_count = 0U;
         bool surface_alive = false;
         bool scrollbar_alive = false;
+        bool search_bar_alive = false;
+        bool settings_window_alive = false;
+        bool shortcut_filter_alive = false;
+        bool output_capture_configured = false;
         bool remote_runtime_initialized = false;
         bool timestamp_visible = false;
         bool surface_has_focus = false;
@@ -178,6 +185,9 @@ public:
     };
 
     bool test_inject_timestamp_request();
+    bool test_inject_output_activity();
+    bool test_inject_backend_error();
+    bool test_set_font_size(double font_size);
     Test_observation test_observation() const;
 
 private:
