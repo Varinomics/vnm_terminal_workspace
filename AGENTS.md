@@ -25,3 +25,4 @@ artifact.
 | Subsystem | Owning source | Focused test target |
 |---|---|---|
 | Pure terminal launch request and cwd advisory | `src/terminal_launch_request.cpp`, `include/vnm_terminal_workspace/terminal_launch_request.h` | `vnm_terminal_workspace_request_tests` |
+| Neutral settlement receipt inbox | `src/terminal_settlement_receipt_inbox.{h,cpp}` | `vnm_terminal_workspace_settlement_receipt_tests` |

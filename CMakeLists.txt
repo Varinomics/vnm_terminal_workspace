@@ -34,6 +34,13 @@ target_include_directories(vnm_terminal_workspace_request
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
+add_library(vnm_terminal_workspace_runtime STATIC
+    src/terminal_settlement_receipt_inbox.cpp)
+target_compile_features(vnm_terminal_workspace_runtime PUBLIC cxx_std_20)
+target_include_directories(vnm_terminal_workspace_runtime
+    PRIVATE
+        src)
+
 if(VNM_TERMINAL_WORKSPACE_BUILD_TESTS)
     add_executable(vnm_terminal_workspace_request_tests
         tests/terminal_launch_request_tests.cpp)
@@ -46,6 +53,18 @@ if(VNM_TERMINAL_WORKSPACE_BUILD_TESTS)
     add_test(
         NAME vnm_terminal_workspace_request_tests
         COMMAND vnm_terminal_workspace_request_tests)
+
+    add_executable(vnm_terminal_workspace_settlement_receipt_tests
+        tests/terminal_settlement_receipt_tests.cpp)
+    target_include_directories(vnm_terminal_workspace_settlement_receipt_tests
+        PRIVATE
+            src)
+    target_link_libraries(vnm_terminal_workspace_settlement_receipt_tests
+        PRIVATE
+            vnm_terminal_workspace_runtime)
+    add_test(
+        NAME vnm_terminal_workspace_settlement_receipt_tests
+        COMMAND vnm_terminal_workspace_settlement_receipt_tests)
 endif()
 
 configure_package_config_file(
