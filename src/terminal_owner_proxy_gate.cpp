@@ -139,9 +139,10 @@ Terminal_owner_proxy_gate::observe_exact_process_death(
 }
 
 VNM_viewer_drain_outcome Terminal_owner_proxy_gate::wait_until_epoch_drained(
-    VNM_viewer_authority_epoch revoked_epoch)
+    VNM_viewer_authority_epoch revoked_epoch,
+    std::chrono::steady_clock::time_point deadline)
 {
-    return m_authority.wait_until_epoch_drained(revoked_epoch);
+    return m_authority.wait_until_epoch_drained(revoked_epoch, deadline);
 }
 
 VNM_viewer_bind_outcome Terminal_owner_proxy_gate::begin_rebind(

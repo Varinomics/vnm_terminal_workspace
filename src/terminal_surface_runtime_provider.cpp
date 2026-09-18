@@ -20,6 +20,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRectF>
 #include <QResource>
 #include <QThread>
 #include <QTimer>
@@ -29,7 +30,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <mutex>
 #include <unordered_set>
@@ -162,12 +162,12 @@ vnm_terminal::terminal_app::Terminal_settings_snapshot terminal_settings(
     snapshot.lcd_subpixel_order = static_cast<int>(settings.lcd_subpixel_order);
     snapshot.row_timestamp_tooltip_enabled =
         settings.row_timestamp_tooltip_enabled;
-    snapshot.scrollback_limit = settings.scrollback_limit;
     return snapshot;
 }
 
 Terminal_worker_settings worker_settings(
-    const vnm_terminal::terminal_app::Terminal_settings_snapshot& snapshot)
+    const vnm_terminal::terminal_app::Terminal_settings_snapshot& snapshot,
+    const VNM_TerminalSurface& surface)
 {
     Terminal_worker_settings settings;
     settings.color_scheme = snapshot.color_scheme.toStdString();
@@ -181,7 +181,12 @@ Terminal_worker_settings worker_settings(
             snapshot.lcd_subpixel_order);
     settings.row_timestamp_tooltip_enabled =
         snapshot.row_timestamp_tooltip_enabled;
-    settings.scrollback_limit = snapshot.scrollback_limit;
+    // The app-support snapshot carries only the MiB buffer budget; the
+    // workspace contract is the surface's line limit, read back live.
+    settings.scrollback_limit =
+        surface.scrollback_limit() == std::numeric_limits<int>::max()
+            ? std::nullopt
+            : std::optional<int>(surface.scrollback_limit());
     return settings;
 }
 
@@ -439,18 +444,22 @@ vnm::vnm_ui_input_message_t remote_input(
     const Terminal_remote_input_message& message)
 {
     vnm::vnm_ui_input_message_t result{};
-    result.event_type = message.event_type;
-    result.modifiers = message.modifiers;
-    result.x = message.x;
-    result.y = message.y;
-    result.button = message.button;
-    result.buttons = message.buttons;
-    result.key = message.key;
-    result.scroll_dx = message.scroll_dx;
-    result.scroll_dy = message.scroll_dy;
-    std::memcpy(result.text_utf8, message.text_utf8.data(),
-        message.text_utf8.size());
-    result.timestamp = message.timestamp;
+    result.event_type         = message.event_type;
+    result.modifiers          = message.modifiers;
+    result.x                  = message.x;
+    result.y                  = message.y;
+    result.button             = message.button;
+    result.buttons            = message.buttons;
+    result.key                = message.key;
+    result.scroll_dx          = message.scroll_dx;
+    result.scroll_dy          = message.scroll_dy;
+    result.text_utf8          = message.text_utf8;
+    result.timestamp          = message.timestamp;
+    result.native_scan_code   = message.native_scan_code;
+    result.native_virtual_key = message.native_virtual_key;
+    result.native_modifiers   = message.native_modifiers;
+    result.auto_repeat        = message.auto_repeat;
+    result.count              = message.count;
     return result;
 }
 
@@ -522,7 +531,8 @@ struct Terminal_surface_runtime_adapter::Impl
             return;
         }
         complete_settings_sink.accept_complete_settings(worker_settings(
-            vnm_terminal::terminal_app::terminal_settings_snapshot(*surface)));
+            vnm_terminal::terminal_app::terminal_settings_snapshot(*surface),
+            *surface));
     }
 
     void observe_first_output()
@@ -664,6 +674,9 @@ struct Terminal_surface_runtime_adapter::Impl
         vnm_terminal::terminal_app::apply_terminal_settings_snapshot(
             *settings,
             *surface);
+        if (configuration.settings.scrollback_limit) {
+            surface->set_scrollback_limit(*configuration.settings.scrollback_limit);
+        }
         scrollbar = new vnm_terminal::terminal_app::Terminal_scrollbar(
             root_item.data());
         scrollbar->set_surface(surface.data());
@@ -774,12 +787,12 @@ struct Terminal_surface_runtime_adapter::Impl
             surface.data(),
             &VNM_TerminalSurface::row_timestamp_tooltip_requested,
             root_item,
-            [this](qreal x, qreal y, const QDateTime& timestamp) {
+            [this](const QRectF& row_rect, const QDateTime& timestamp) {
                 if (root_item == nullptr) {
                     return;
                 }
-                root_item->setProperty("timestampX", x);
-                root_item->setProperty("timestampY", y);
+                root_item->setProperty("timestampX", row_rect.x());
+                root_item->setProperty("timestampY", row_rect.bottom());
                 root_item->setProperty(
                     "timestampText",
                     timestamp.toString(Qt::ISODateWithMs));
@@ -1274,8 +1287,7 @@ bool Terminal_surface_runtime_adapter::test_inject_timestamp_request()
         return false;
     }
     emit m_impl->surface->row_timestamp_tooltip_requested(
-        20.0,
-        30.0,
+        QRectF(20.0, 30.0, 120.0, 14.0),
         QDateTime::fromMSecsSinceEpoch(1000, Qt::UTC));
     return m_impl->root_item->property("timestampVisible").toBool() &&
         !m_impl->root_item->property("timestampText").toString().isEmpty();

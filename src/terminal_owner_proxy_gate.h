@@ -3,6 +3,7 @@
 #include "terminal_owner_core.h"
 #include "vnm_viewer_authority.h"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -64,7 +65,8 @@ public:
             std::uint64_t native_process_id,
             std::uint64_t native_process_creation_identity);
     [[nodiscard]] VNM_viewer_drain_outcome wait_until_epoch_drained(
-        VNM_viewer_authority_epoch revoked_epoch);
+        VNM_viewer_authority_epoch revoked_epoch,
+        std::chrono::steady_clock::time_point deadline);
     [[nodiscard]] VNM_viewer_bind_outcome begin_rebind(
         const VNM_viewer_identity& identity);
     [[nodiscard]] VNM_viewer_rebind_transition_outcome commit_rebind(

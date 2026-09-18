@@ -4,6 +4,8 @@
 #include "vnm_ls_remote_ui_adapter.h"
 #include "vnm_plugin_contract.h"
 
+#include "remote_ui_runtime/vnm_remote_ui_input_callback.h"
+
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -500,20 +502,25 @@ bool initialize_state(
 }
 
 workspace::Terminal_remote_input_message input_message(
-    const ls_remote_ui_input_event_t& event)
+    const vnm::vnm_ui_input_message_t& decoded)
 {
     workspace::Terminal_remote_input_message message;
-    message.event_type = event.event_type;
-    message.modifiers = event.modifiers;
-    message.x = event.x;
-    message.y = event.y;
-    message.button = event.button;
-    message.buttons = event.buttons;
-    message.key = event.key;
-    message.scroll_dx = event.scroll_dx;
-    message.scroll_dy = event.scroll_dy;
-    std::memcpy(message.text_utf8.data(), event.text_utf8, message.text_utf8.size());
-    message.timestamp = event.timestamp;
+    message.event_type         = decoded.event_type;
+    message.modifiers          = decoded.modifiers;
+    message.x                  = decoded.x;
+    message.y                  = decoded.y;
+    message.button             = decoded.button;
+    message.buttons            = decoded.buttons;
+    message.key                = decoded.key;
+    message.scroll_dx          = decoded.scroll_dx;
+    message.scroll_dy          = decoded.scroll_dy;
+    message.text_utf8          = decoded.text_utf8;
+    message.timestamp          = decoded.timestamp;
+    message.native_scan_code   = decoded.native_scan_code;
+    message.native_virtual_key = decoded.native_virtual_key;
+    message.native_modifiers   = decoded.native_modifiers;
+    message.auto_repeat        = decoded.auto_repeat;
+    message.count              = decoded.count;
     return message;
 }
 
@@ -654,16 +661,19 @@ LS_API void LS_CALL ls_remote_ui_init(
         Qt::QueuedConnection);
 }
 
-LS_API void LS_CALL ls_on_remote_ui_input(
+LS_API void LS_CALL ls_on_remote_ui_input_v2(
     void* instance,
     const ls_remote_ui_input_event_t* event)
 {
     auto* state = static_cast<Worker_state*>(instance);
-    if (state != nullptr && state->runtime && event != nullptr &&
-        event->struct_size >= sizeof(ls_remote_ui_input_event_t))
-    {
-        static_cast<void>(state->runtime->forward_input(input_message(*event)));
+    if (state == nullptr || !state->runtime) {
+        return;
     }
+    vnm::vnm_ui_input_message_t decoded;
+    if (!vnm::decode_remote_ui_input_callback(event, &decoded)) {
+        return;
+    }
+    static_cast<void>(state->runtime->forward_input(input_message(decoded)));
 }
 
 LS_API void LS_CALL ls_on_remote_ui_state(

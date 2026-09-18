@@ -99,6 +99,22 @@ void clear_bytes(std::vector<std::uint8_t>& bytes)
     bytes.clear();
 }
 
+vnm::Remote_key_event remote_key_event(
+    const Terminal_remote_input_message& message)
+{
+    vnm::Remote_key_event event;
+    event.key                = message.key;
+    event.modifiers          = message.modifiers;
+    event.text_utf8          = message.text_utf8;
+    event.native_scan_code   = message.native_scan_code;
+    event.native_virtual_key = message.native_virtual_key;
+    event.native_modifiers   = message.native_modifiers;
+    event.auto_repeat        = message.auto_repeat;
+    event.count              = message.count;
+    event.timestamp          = message.timestamp;
+    return event;
+}
+
 environment_policy::Environment_platform environment_platform(
     Launch_platform platform)
 {
@@ -1063,23 +1079,16 @@ void Terminal_hosted_owner::send_input(
             message.modifiers, message.timestamp);
         break;
     case vnm::k_ui_input_key_press:
-        live.session->send_key_press(message.key, message.modifiers);
+        live.session->send_key_press(remote_key_event(message));
         break;
     case vnm::k_ui_input_key_release:
-        live.session->send_key_release(message.key, message.modifiers);
+        live.session->send_key_release(remote_key_event(message));
         break;
     case vnm::k_ui_input_text:
-    {
-        const auto end = std::find(
-            message.text_utf8.begin(),
-            message.text_utf8.end(),
-            '\0');
         live.session->send_text_input(QString::fromUtf8(
             message.text_utf8.data(),
-            static_cast<qsizetype>(
-                std::distance(message.text_utf8.begin(), end))));
+            static_cast<qsizetype>(message.text_utf8.size())));
         break;
-    }
     case vnm::k_ui_input_enter:
         live.session->send_enter(message.x, message.y, message.timestamp);
         break;

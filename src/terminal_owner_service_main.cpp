@@ -6,6 +6,8 @@
 
 #include "vnm_remote_runtime.h"
 
+#include "remote_ui_common/vnm_remote_ui_protocol.h"
+
 #include <QCoreApplication>
 #include <QDeadlineTimer>
 #include <QFileInfo>
@@ -708,17 +710,32 @@ private:
         quint32 key = 0U;
         float scroll_dx = 0.0F;
         float scroll_dy = 0.0F;
-        QByteArray text;
+        std::string text;
         quint64 timestamp = 0U;
+        quint32 native_scan_code = 0U;
+        quint32 native_virtual_key = 0U;
+        quint32 native_modifiers = 0U;
+        quint16 count = 0U;
+        bool auto_repeat = false;
         if (!detail::read_string(reader, session_identity)) {
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
         reader
             >> generation >> revision >> event_type >> modifiers >> x >> y
-            >> button >> buttons >> key >> scroll_dx >> scroll_dy >> text
-            >> timestamp;
-        if (reader.status() != QDataStream::Ok || text.size() != 32) {
+            >> button >> buttons >> key >> scroll_dx >> scroll_dy;
+        if (reader.status() != QDataStream::Ok ||
+            !detail::read_string(reader, text))
+        {
+            send_status(Terminal_owner_wire_status::MALFORMED);
+            return;
+        }
+        reader
+            >> timestamp >> native_scan_code >> native_virtual_key
+            >> native_modifiers >> count >> auto_repeat;
+        if (reader.status() != QDataStream::Ok ||
+            text.size() > vnm::k_remote_ui_input_max_text_bytes)
+        {
             send_status(Terminal_owner_wire_status::MALFORMED);
             return;
         }
@@ -732,8 +749,13 @@ private:
         message.key = key;
         message.scroll_dx = scroll_dx;
         message.scroll_dy = scroll_dy;
-        std::copy(text.cbegin(), text.cend(), message.text_utf8.begin());
+        message.text_utf8 = std::move(text);
         message.timestamp = timestamp;
+        message.native_scan_code = native_scan_code;
+        message.native_virtual_key = native_virtual_key;
+        message.native_modifiers = native_modifiers;
+        message.auto_repeat = auto_repeat;
+        message.count = count;
         send_enum(m_host->forward_input(
             m_arguments.viewer_identity.transport_process_id,
             m_epoch,

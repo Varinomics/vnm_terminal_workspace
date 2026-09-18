@@ -563,10 +563,13 @@ Terminal_owner_host::observe_exact_viewer_death(
 
 Terminal_owner_viewer_drain_outcome
 Terminal_owner_host::wait_until_viewer_epoch_drained(
-    Terminal_owner_viewer_epoch revoked_epoch)
+    Terminal_owner_viewer_epoch revoked_epoch,
+    std::chrono::steady_clock::time_point deadline)
 {
     return drain_outcome(
-        m_impl->owner.proxy_gate().wait_until_epoch_drained(revoked_epoch));
+        m_impl->owner.proxy_gate().wait_until_epoch_drained(
+            revoked_epoch,
+            deadline));
 }
 
 Terminal_owner_viewer_bind_outcome Terminal_owner_host::begin_viewer_rebind(

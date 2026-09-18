@@ -299,7 +299,8 @@ public:
         std::uint64_t native_process_id,
         std::uint64_t native_process_creation_identity);
     Terminal_owner_viewer_drain_outcome wait_until_viewer_epoch_drained(
-        Terminal_owner_viewer_epoch revoked_epoch);
+        Terminal_owner_viewer_epoch revoked_epoch,
+        std::chrono::steady_clock::time_point deadline);
     Terminal_owner_viewer_bind_outcome begin_viewer_rebind(
         const Terminal_owner_viewer_identity& identity);
     Terminal_owner_viewer_rebind_outcome commit_viewer_rebind(

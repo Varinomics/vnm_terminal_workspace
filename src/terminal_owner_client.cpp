@@ -661,9 +661,15 @@ Terminal_owner_proxy_outcome Terminal_owner_client::forward_input(
         << static_cast<quint32>(message.buttons)
         << static_cast<quint32>(message.key)
         << message.scroll_dx
-        << message.scroll_dy
-        << QByteArray(message.text_utf8.data(), message.text_utf8.size())
-        << static_cast<quint64>(message.timestamp);
+        << message.scroll_dy;
+    detail::write_string(writer, message.text_utf8);
+    writer
+        << static_cast<quint64>(message.timestamp)
+        << static_cast<quint32>(message.native_scan_code)
+        << static_cast<quint32>(message.native_virtual_key)
+        << static_cast<quint32>(message.native_modifiers)
+        << static_cast<quint16>(message.count)
+        << message.auto_repeat;
     const auto response = m_impl->transact(std::move(request));
     if (!response) {
         return Terminal_owner_proxy_outcome::AUTHORITY_REJECTED;

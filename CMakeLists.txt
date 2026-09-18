@@ -268,6 +268,7 @@ if(VNM_TERMINAL_WORKSPACE_BUILD_TESTS)
             PRIVATE
                 vnm_terminal_workspace::vnm_terminal_workspace_surface_provider
                 vnm_terminal_surface::vnm_terminal_surface)
+        vnm_terminal_deploy_conpty(vnm_terminal_workspace_surface_provider_tests)
         add_test(
             NAME vnm_terminal_workspace_surface_provider_tests
             COMMAND vnm_terminal_workspace_surface_provider_tests)
@@ -300,6 +301,23 @@ if(VNM_TERMINAL_WORKSPACE_BUILD_TESTS)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 
     if(WIN32)
+        # The terminal worker DLL hosts its terminal inside the framework's
+        # vnm_hosted_worker_host process, so the packaged ConPTY runtime must
+        # sit beside that executable. The framework target is created in the
+        # FetchContent sub-build directory, which POST_BUILD staging cannot
+        # reach; DESTINATION exists for exactly this cross-directory case.
+        get_property(_vnm_tw_conpty_destination_supported
+            GLOBAL PROPERTY vnm_terminal_conpty_deploy_destination_supported)
+        if(NOT _vnm_tw_conpty_destination_supported)
+            message(FATAL_ERROR
+                "vnm_terminal_workspace hosted tests require the ConPTY "
+                "runtime beside vnm_hosted_worker_host, but the resolved "
+                "vnm_terminal_surface does not support DESTINATION staging")
+        endif()
+        vnm_terminal_deploy_conpty(vnm_hosted_worker_host
+            DESTINATION
+                "${CMAKE_BINARY_DIR}/_deps/vnm_terminal_workspace_framework-build")
+
         add_executable(vnm_terminal_workspace_hosted_owner_tests
             tests/terminal_hosted_owner_tests.cpp)
         target_include_directories(

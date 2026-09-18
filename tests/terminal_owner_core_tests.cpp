@@ -345,7 +345,9 @@ bool framework_authority_gates_attach_existing_and_input()
                 detail::Terminal_proxy_gate_outcome::AUTHORITY_REJECTED,
         "exact death must revoke the old epoch without closing protected custody");
     ok &= check(
-        proxy.wait_until_epoch_drained(death.revoked_epoch) ==
+        proxy.wait_until_epoch_drained(
+                death.revoked_epoch,
+                std::chrono::steady_clock::now() + std::chrono::seconds(5)) ==
                 vnm::VNM_viewer_drain_outcome::DRAINED &&
             proxy.begin_rebind(second_viewer) ==
                 vnm::VNM_viewer_bind_outcome::BOUND &&

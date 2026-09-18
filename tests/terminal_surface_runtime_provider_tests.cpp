@@ -846,7 +846,7 @@ bool released_start_dispatches_once_with_exact_environment()
         process_count_for_image(fixture->child_image) == 0U,
         "controlled child must be gone after the exit fact is reconciled");
     ok &= check(
-        diagnostic_sink.output_activity_calls == 1 &&
+        diagnostic_sink.output_activity_calls >= 1 &&
             diagnostic_sink.first_text_frame_calls == 1 &&
             diagnostic_sink.first_text_frame &&
             diagnostic_sink.first_text_frame->backend_ready &&

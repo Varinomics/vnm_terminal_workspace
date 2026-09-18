@@ -2,7 +2,6 @@
 
 #include "vnm_terminal_workspace/terminal_launch_request.h"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -343,8 +342,13 @@ struct Terminal_remote_input_message
     std::uint32_t key = 0U;
     float scroll_dx = 0.0F;
     float scroll_dy = 0.0F;
-    std::array<char, 32U> text_utf8{};
+    std::string text_utf8;
     std::uint64_t timestamp = 0U;
+    std::uint32_t native_scan_code = 0U;
+    std::uint32_t native_virtual_key = 0U;
+    std::uint32_t native_modifiers = 0U;
+    bool auto_repeat = false;
+    std::uint16_t count = 1U;
 };
 
 struct Terminal_remote_state_message

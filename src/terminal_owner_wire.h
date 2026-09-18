@@ -13,7 +13,7 @@
 
 namespace vnm::terminal_workspace::detail {
 
-inline constexpr std::uint32_t k_terminal_owner_wire_version = 3U;
+inline constexpr std::uint32_t k_terminal_owner_wire_version = 4U;
 inline constexpr std::uint32_t k_terminal_owner_maximum_frame_bytes =
     4U * 1024U * 1024U;
 
