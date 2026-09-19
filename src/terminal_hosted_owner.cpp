@@ -1,4 +1,6 @@
 #include "terminal_hosted_owner.h"
+#include "terminal_remote_input.h"
+#include "remote_ui_common/vnm_remote_key_event.h"
 
 #include "vnm_terminal_workspace/terminal_worker_composition.h"
 
@@ -505,8 +507,8 @@ Terminal_proxy_gate_outcome Terminal_hosted_owner::forward_input(
     std::uint64_t attachment_revision,
     const Terminal_remote_input_message& message)
 {
-    if (message.event_type < vnm::k_ui_input_mouse_move ||
-        message.event_type > vnm::k_ui_input_mouse_double_click)
+    if (validate_terminal_remote_input(message) !=
+        vnm::Remote_ui_input_decode_result::DECODED)
     {
         return Terminal_proxy_gate_outcome::INVALID_MESSAGE;
     }
@@ -1085,9 +1087,7 @@ void Terminal_hosted_owner::send_input(
         live.session->send_key_release(remote_key_event(message));
         break;
     case vnm::k_ui_input_text:
-        live.session->send_text_input(QString::fromUtf8(
-            message.text_utf8.data(),
-            static_cast<qsizetype>(message.text_utf8.size())));
+        live.session->send_text_input(vnm::remote_input_text(message.text_utf8));
         break;
     case vnm::k_ui_input_enter:
         live.session->send_enter(message.x, message.y, message.timestamp);

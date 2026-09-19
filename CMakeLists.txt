@@ -282,6 +282,28 @@ if(VNM_TERMINAL_WORKSPACE_BUILD_TESTS)
                     "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     endif()
 
+    add_executable(vnm_terminal_workspace_remote_input_tests
+        tests/terminal_remote_input_tests.cpp)
+    target_include_directories(vnm_terminal_workspace_remote_input_tests PRIVATE
+        include src)
+    target_link_libraries(vnm_terminal_workspace_remote_input_tests PRIVATE
+        vnm_terminal_workspace::vnm_terminal_workspace_request
+        vnm_framework::vnm_remote_ui_common)
+    add_test(NAME vnm_terminal_workspace_remote_input_tests
+        COMMAND vnm_terminal_workspace_remote_input_tests)
+    set_tests_properties(vnm_terminal_workspace_remote_input_tests PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+
+    add_executable(vnm_terminal_workspace_owner_input_admission_tests
+        tests/terminal_owner_input_admission_tests.cpp)
+    target_link_libraries(vnm_terminal_workspace_owner_input_admission_tests PRIVATE
+        vnm_terminal_workspace::vnm_terminal_workspace_owner
+        vnm_framework::vnm_remote_ui_runtime Qt6::Core)
+    add_test(NAME vnm_terminal_workspace_owner_input_admission_tests
+        COMMAND vnm_terminal_workspace_owner_input_admission_tests)
+    set_tests_properties(vnm_terminal_workspace_owner_input_admission_tests PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+
     add_executable(vnm_terminal_workspace_owner_core_tests
         tests/terminal_owner_core_tests.cpp)
     target_include_directories(vnm_terminal_workspace_owner_core_tests

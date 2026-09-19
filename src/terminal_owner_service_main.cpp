@@ -3,6 +3,7 @@
 #include "terminal_owner_process_identity.h"
 #include "terminal_owner_service_policy.h"
 #include "terminal_owner_wire.h"
+#include "terminal_remote_input.h"
 
 #include "vnm_remote_runtime.h"
 
@@ -756,6 +757,12 @@ private:
         message.native_modifiers = native_modifiers;
         message.auto_repeat = auto_repeat;
         message.count = count;
+        if (detail::validate_terminal_remote_input(message) !=
+            vnm::Remote_ui_input_decode_result::DECODED)
+        {
+            send_status(Terminal_owner_wire_status::MALFORMED);
+            return;
+        }
         send_enum(m_host->forward_input(
             m_arguments.viewer_identity.transport_process_id,
             m_epoch,
