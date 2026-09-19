@@ -211,7 +211,7 @@ configure_file(
     COPYONLY)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
-   TARGET vnm_framework::vnm_process_custody_owner AND TARGET vnm_hosted_worker_host)
+   TARGET vnm_process_custody::vnm_process_custody_owner AND TARGET vnm_hosted_worker_host)
     vnm_process_custody_deploy_owner(vnm_hosted_worker_host)
 endif()
 
