@@ -157,12 +157,6 @@ VNM_viewer_rebind_transition_outcome Terminal_owner_proxy_gate::commit_rebind(
     return m_authority.commit_rebind(identity);
 }
 
-VNM_viewer_rebind_transition_outcome Terminal_owner_proxy_gate::cancel_rebind(
-    const VNM_viewer_identity& identity)
-{
-    return m_authority.cancel_rebind(identity);
-}
-
 void Terminal_owner_proxy_gate::route_departure(
     Terminal_viewer_departure_kind kind)
 {

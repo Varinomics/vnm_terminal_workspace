@@ -71,8 +71,6 @@ public:
         const VNM_viewer_identity& identity);
     [[nodiscard]] VNM_viewer_rebind_transition_outcome commit_rebind(
         const VNM_viewer_identity& identity);
-    [[nodiscard]] VNM_viewer_rebind_transition_outcome cancel_rebind(
-        const VNM_viewer_identity& identity);
 
 private:
     void route_departure(Terminal_viewer_departure_kind kind);

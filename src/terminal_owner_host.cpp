@@ -586,13 +586,6 @@ Terminal_owner_viewer_rebind_outcome Terminal_owner_host::commit_viewer_rebind(
         m_impl->owner.proxy_gate().commit_rebind(viewer_identity(identity)));
 }
 
-Terminal_owner_viewer_rebind_outcome Terminal_owner_host::cancel_viewer_rebind(
-    const Terminal_owner_viewer_identity& identity)
-{
-    return rebind_outcome(
-        m_impl->owner.proxy_gate().cancel_rebind(viewer_identity(identity)));
-}
-
 bool Terminal_owner_host::contains_unprotected_settlement(
     const std::string& session_identity,
     std::uint64_t generation,

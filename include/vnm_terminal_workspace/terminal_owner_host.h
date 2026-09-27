@@ -305,8 +305,6 @@ public:
         const Terminal_owner_viewer_identity& identity);
     Terminal_owner_viewer_rebind_outcome commit_viewer_rebind(
         const Terminal_owner_viewer_identity& identity);
-    Terminal_owner_viewer_rebind_outcome cancel_viewer_rebind(
-        const Terminal_owner_viewer_identity& identity);
 
     bool contains_unprotected_settlement(
         const std::string& session_identity,
