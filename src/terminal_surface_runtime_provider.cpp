@@ -717,27 +717,10 @@ struct Terminal_surface_runtime_adapter::Impl
         QObject::connect(
             shortcut_filter.data(),
             &vnm_terminal::terminal_app::Terminal_shortcut_filter::
-                search_requested,
+                search_shortcut_requested,
             search_bar.data(),
-            &vnm_terminal::terminal_app::Terminal_search_bar::show_search);
-        QObject::connect(
-            shortcut_filter.data(),
-            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
-                search_next_requested,
-            surface.data(),
-            [this] { static_cast<void>(surface->search_next()); });
-        QObject::connect(
-            shortcut_filter.data(),
-            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
-                search_previous_requested,
-            surface.data(),
-            [this] { static_cast<void>(surface->search_previous()); });
-        QObject::connect(
-            shortcut_filter.data(),
-            &vnm_terminal::terminal_app::Terminal_shortcut_filter::
-                search_dismiss_requested,
-            search_bar.data(),
-            &vnm_terminal::terminal_app::Terminal_search_bar::dismiss_search);
+            &vnm_terminal::terminal_app::Terminal_search_bar::
+                apply_shortcut_action);
         QObject::connect(
             shortcut_filter.data(),
             &vnm_terminal::terminal_app::Terminal_shortcut_filter::
