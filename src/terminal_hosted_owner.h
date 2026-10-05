@@ -6,6 +6,7 @@
 
 #include "vnm_control_router.h"
 #include "vnm_hosted_worker_session.h"
+#include "vnm_process_exit_status.h"
 
 #include <QString>
 
@@ -152,7 +153,7 @@ private:
     void settle_close(
         Live_session& live,
         const VNM_Hosted_worker_close_result& result);
-    void settle_running_crash(Live_session& live, int exit_code);
+    void settle_running_crash(Live_session& live, vnm::process_exit_t process_exit);
     void reserve_first_close_cause(
         Live_session& live,
         Terminal_close_cause cause);

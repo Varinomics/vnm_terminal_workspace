@@ -451,8 +451,8 @@ bool rejected_close_cause_survives_running_crash_without_reuse_leak()
                 detail::Terminal_close_cause::EXPLICIT_CLOSE) ==
                 detail::Terminal_owner_update_result::REJECTED,
         "the crash fixture must reserve one rejected explicit close cause");
-    hosted_session->terminal_crash(19);
-    hosted_session->terminal_crash(19);
+    hosted_session->terminal_crash({vnm::Process_exit_status_kind::EXITED, 19});
+    hosted_session->terminal_crash({vnm::Process_exit_status_kind::EXITED, 19});
     ok &= check(
         first_capability->settlement_count == 1 &&
             first_capability->settlement &&
@@ -469,7 +469,7 @@ bool rejected_close_cause_survives_running_crash_without_reuse_leak()
         workspace::Launch_platform::WINDOWS,
         std::nullopt,
         reused_capability);
-    hosted_session->terminal_crash(23);
+    hosted_session->terminal_crash({vnm::Process_exit_status_kind::EXITED, 23});
     ok &= check(
         reused_launch.outcome ==
                 detail::Terminal_hosted_launch_outcome::ADMITTED &&

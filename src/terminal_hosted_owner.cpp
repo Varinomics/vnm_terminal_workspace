@@ -21,6 +21,16 @@ namespace {
 
 constexpr char k_fact_provider_class[] =
     "vnm_terminal_workspace.terminal_facts";
+
+// A settlement records an exit code only when the host ended with one. A
+// signal number or an unobserved status is not an exit code.
+std::optional<int> settlement_exit_code(vnm::process_exit_t process_exit)
+{
+    return process_exit.kind == vnm::Process_exit_status_kind::EXITED
+        ? std::optional<int>(process_exit.status)
+        : std::nullopt;
+}
+
 QString acknowledgement_name(Terminal_child_fact_acknowledgement value)
 {
     switch (value)
@@ -755,8 +765,8 @@ void Terminal_hosted_owner::connect_session(Live_session& live)
         session,
         &VNM_Hosted_worker_session::terminal_crash,
         session,
-        [this, &live](int exit_code) {
-            settle_running_crash(live, exit_code);
+        [this, &live](vnm::process_exit_t process_exit) {
+            settle_running_crash(live, process_exit);
         });
     live.attachment_connection = QObject::connect(
         session,
@@ -823,7 +833,7 @@ void Terminal_hosted_owner::settle_close(
 
 void Terminal_hosted_owner::settle_running_crash(
     Live_session& live,
-    int exit_code)
+    vnm::process_exit_t process_exit)
 {
     const std::string identity = live.session_identity;
     reserve_first_close_cause(live, Terminal_close_cause::WORKER_CRASH);
@@ -838,7 +848,7 @@ void Terminal_hosted_owner::settle_running_crash(
         live.generation,
         std::nullopt,
         disposition,
-        exit_code,
+        settlement_exit_code(process_exit),
     }, Terminal_owner_core::Time_point::clock::now()));
     erase_settled_session(identity);
 }
