@@ -10,6 +10,7 @@
 #include "vnm_terminal/backend_output_capture.h"
 #include "vnm_terminal/diagnostics/metrics_json.h"
 #include "vnm_terminal/terminal_message_submission.h"
+#include "vnm_terminal/terminal_renderer_surface_format.h"
 #include "vnm_terminal/vnm_terminal_surface.h"
 
 #include <QByteArray>
@@ -1007,6 +1008,8 @@ Terminal_surface_runtime_adapter::initialize()
                 : Terminal_gui_dispatch_kind::QUEUED;
             return m_impl->dispatch(kind, function);
         };
+    remote_configuration.before_load =
+        vnm_terminal::apply_terminal_renderer_minimum_surface_format;
     remote_configuration.after_load =
         [this](QObject* root) {
             m_impl->construct_private_root(root);
